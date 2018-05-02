@@ -9,6 +9,9 @@ obj-$(CONFIG_BPF_SYSCALL) += btf.o
 ifeq ($(CONFIG_NET),y)
 obj-$(CONFIG_BPF_SYSCALL) += devmap.o
 obj-$(CONFIG_BPF_SYSCALL) += cpumap.o
+ifeq ($(CONFIG_XDP_SOCKETS),y)
+obj-$(CONFIG_BPF_SYSCALL) += xskmap.o
+endif
 ifeq ($(CONFIG_STREAM_PARSER),y)
 ifeq ($(CONFIG_INET),y)
 obj-$(CONFIG_BPF_SYSCALL) += sockmap.o

@@ -2698,8 +2698,11 @@ static int check_map_func_compatibility(struct bpf_verifier_env *env,
 		    func_id != BPF_FUNC_map_lookup_elem)
 			goto error;
 		break;
-	/* Restrict bpf side of cpumap, open when use-cases appear */
+	/* Restrict bpf side of cpumap and xskmap, open when use-cases
+	 * appear.
+	 */
 	case BPF_MAP_TYPE_CPUMAP:
+	case BPF_MAP_TYPE_XSKMAP:
 		if (func_id != BPF_FUNC_redirect_map)
 			goto error;
 		break;
@@ -2770,6 +2773,7 @@ static int check_map_func_compatibility(struct bpf_verifier_env *env,
 	case BPF_FUNC_redirect_map:
 		if (map->map_type != BPF_MAP_TYPE_DEVMAP &&
 		    map->map_type != BPF_MAP_TYPE_CPUMAP &&
+                    map->map_type != BPF_MAP_TYPE_XSKMAP &&
 		    map->map_type != BPF_MAP_TYPE_DEVMAP_HASH)
 			goto error;
 		break;

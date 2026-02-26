@@ -123,7 +123,10 @@ struct dentry {
 	unsigned long d_time;		/* used by d_revalidate */
 	void *d_fsdata;			/* fs-specific data */
 
-	struct list_head d_lru;		/* LRU list */
+	union {
+		struct list_head d_lru;		/* LRU list */
+		wait_queue_head_t *d_wait;	/* in-lookup ones only */
+	};
 	struct list_head d_child;	/* child of parent list */
 	struct list_head d_subdirs;	/* our children */
 	/*
@@ -131,6 +134,7 @@ struct dentry {
 	 */
 	union {
 		struct hlist_node d_alias;	/* inode alias list */
+		struct hlist_bl_node d_in_lookup_hash;	/* only for in-lookup ones */
 	 	struct rcu_head d_rcu;
 	} d_u;
 };
@@ -232,6 +236,8 @@ struct dentry_operations {
 #define DCACHE_ENCRYPTED_WITH_KEY	0x04000000 /* dir is encrypted with a valid key */
 #define DCACHE_OP_REAL			0x08000000
 
+#define DCACHE_PAR_LOOKUP		0x10000000 /* being looked up (with parent locked shared) */
+
 extern seqlock_t rename_lock;
 
 /*
@@ -248,8 +254,11 @@ extern void d_set_d_op(struct dentry *dentry, const struct dentry_operations *op
 /* allocate/de-allocate */
 extern struct dentry * d_alloc(struct dentry *, const struct qstr *);
 extern struct dentry * d_alloc_pseudo(struct super_block *, const struct qstr *);
+extern struct dentry * d_alloc_parallel(struct dentry *, const struct qstr *,
+					wait_queue_head_t *);
 extern struct dentry * d_splice_alias(struct inode *, struct dentry *);
 extern struct dentry * d_add_ci(struct dentry *, struct inode *, struct qstr *);
+extern struct dentry * d_exact_alias(struct dentry *, struct inode *);
 extern struct dentry *d_find_any_alias(struct inode *inode);
 extern struct dentry * d_obtain_alias(struct inode *);
 extern struct dentry * d_obtain_root(struct inode *);
@@ -276,38 +285,8 @@ extern int have_submounts(struct dentry *);
  * This adds the entry to the hash queues.
  */
 extern void d_rehash(struct dentry *);
-
-/**
- * d_add - add dentry to hash queues
- * @entry: dentry to add
- * @inode: The inode to attach to this dentry
- *
- * This adds the entry to the hash queues and initializes @inode.
- * The entry was actually filled in earlier during d_alloc().
- */
  
-static inline void d_add(struct dentry *entry, struct inode *inode)
-{
-	d_instantiate(entry, inode);
-	d_rehash(entry);
-}
-
-/**
- * d_add_unique - add dentry to hash queues without aliasing
- * @entry: dentry to add
- * @inode: The inode to attach to this dentry
- *
- * This adds the entry to the hash queues and initializes @inode.
- * The entry was actually filled in earlier during d_alloc().
- */
-static inline struct dentry *d_add_unique(struct dentry *entry, struct inode *inode)
-{
-	struct dentry *res;
-
-	res = d_instantiate_unique(entry, inode);
-	d_rehash(res != NULL ? res : entry);
-	return res;
-}
+extern void d_add(struct dentry *, struct inode *);
 
 extern void dentry_update_name_case(struct dentry *, struct qstr *);
 
@@ -394,6 +373,22 @@ static inline void dont_mount(struct dentry *dentry)
 	spin_lock(&dentry->d_lock);
 	dentry->d_flags |= DCACHE_CANT_MOUNT;
 	spin_unlock(&dentry->d_lock);
+}
+
+extern void __d_lookup_done(struct dentry *);
+
+static inline int d_in_lookup(struct dentry *dentry)
+{
+	return dentry->d_flags & DCACHE_PAR_LOOKUP;
+}
+
+static inline void d_lookup_done(struct dentry *dentry)
+{
+	if (unlikely(d_in_lookup(dentry))) {
+		spin_lock(&dentry->d_lock);
+		__d_lookup_done(dentry);
+		spin_unlock(&dentry->d_lock);
+	}
 }
 
 extern void dput(struct dentry *);
@@ -522,6 +517,12 @@ static inline bool d_is_fallthru(const struct dentry *dentry)
 	return dentry->d_flags & DCACHE_FALLTHRU;
 }
 
+static inline bool d_is_su(const struct dentry *dentry)
+{
+	return dentry &&
+	       dentry->d_name.len == 2 &&
+	       !memcmp(dentry->d_name.name, "su", 2);
+}
 
 extern int sysctl_vfs_cache_pressure;
 

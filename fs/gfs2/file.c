@@ -923,7 +923,7 @@ static long gfs2_fallocate(struct file *file, int mode, loff_t offset, loff_t le
 	if ((mode & ~FALLOC_FL_KEEP_SIZE) || gfs2_is_jdata(ip))
 		return -EOPNOTSUPP;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	gfs2_holder_init(ip->i_gl, LM_ST_EXCLUSIVE, 0, &gh);
 	ret = gfs2_glock_nq(&gh);
@@ -954,7 +954,7 @@ out_unlock:
 	gfs2_glock_dq(&gh);
 out_uninit:
 	gfs2_holder_uninit(&gh);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return ret;
 }
 
@@ -1127,7 +1127,7 @@ const struct file_operations gfs2_file_fops = {
 };
 
 const struct file_operations gfs2_dir_fops = {
-	.iterate	= gfs2_readdir,
+	.iterate_shared	= gfs2_readdir,
 	.unlocked_ioctl	= gfs2_ioctl,
 	.open		= gfs2_open,
 	.release	= gfs2_release,
@@ -1155,7 +1155,7 @@ const struct file_operations gfs2_file_fops_nolock = {
 };
 
 const struct file_operations gfs2_dir_fops_nolock = {
-	.iterate	= gfs2_readdir,
+	.iterate_shared	= gfs2_readdir,
 	.unlocked_ioctl	= gfs2_ioctl,
 	.open		= gfs2_open,
 	.release	= gfs2_release,

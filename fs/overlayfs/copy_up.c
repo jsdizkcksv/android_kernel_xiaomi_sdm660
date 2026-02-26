@@ -27,8 +27,8 @@ int ovl_copy_xattr(struct dentry *old, struct dentry *new)
 	int error = 0;
 	size_t slen;
 
-	if (!old->d_inode->i_op->getxattr ||
-	    !new->d_inode->i_op->getxattr)
+	if (!(old->d_inode->i_opflags & IOP_XATTR) ||
+	    !(new->d_inode->i_opflags & IOP_XATTR))
 		return 0;
 
 	list_size = vfs_listxattr(old, NULL, 0);
@@ -262,9 +262,9 @@ static int ovl_copy_up_locked(struct dentry *workdir, struct dentry *upperdir,
 	if (err)
 		goto out_cleanup;
 
-	mutex_lock(&newdentry->d_inode->i_mutex);
+	inode_lock(newdentry->d_inode);
 	err = ovl_set_attr(newdentry, stat);
-	mutex_unlock(&newdentry->d_inode->i_mutex);
+	inode_unlock(newdentry->d_inode);
 	if (err)
 		goto out_cleanup;
 

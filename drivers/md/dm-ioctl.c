@@ -1670,8 +1670,7 @@ static int check_version(unsigned int cmd, struct dm_ioctl __user *user)
 	return r;
 }
 
-#define DM_PARAMS_KMALLOC	0x0001	/* Params alloced with kmalloc */
-#define DM_PARAMS_VMALLOC	0x0002	/* Params alloced with vmalloc */
+#define DM_PARAMS_MALLOC	0x0001	/* Params allocated with kvmalloc() */
 #define DM_WIPE_BUFFER		0x0010	/* Wipe input buffer before returning from ioctl */
 
 static void free_params(struct dm_ioctl *param, size_t param_size, int param_flags)
@@ -1679,10 +1678,8 @@ static void free_params(struct dm_ioctl *param, size_t param_size, int param_fla
 	if (param_flags & DM_WIPE_BUFFER)
 		memset(param, 0, param_size);
 
-	if (param_flags & DM_PARAMS_KMALLOC)
-		kfree(param);
-	if (param_flags & DM_PARAMS_VMALLOC)
-		vfree(param);
+	if (param_flags & DM_PARAMS_MALLOC)
+		kvfree(param);
 }
 
 static int copy_params(struct dm_ioctl __user *user, struct dm_ioctl *param_kernel,
@@ -1690,7 +1687,8 @@ static int copy_params(struct dm_ioctl __user *user, struct dm_ioctl *param_kern
 {
 	struct dm_ioctl *dmi;
 	int secure_data;
-	const size_t minimum_data_size = sizeof(*param_kernel) - sizeof(param_kernel->data);
+	const size_t minimum_data_size = offsetof(struct dm_ioctl, data);
+	unsigned noio_flag;
 
 	if (copy_from_user(param_kernel, user, minimum_data_size))
 		return -EFAULT;
@@ -1709,30 +1707,22 @@ static int copy_params(struct dm_ioctl __user *user, struct dm_ioctl *param_kern
 	}
 
 	/*
-	 * Try to avoid low memory issues when a device is suspended.
+	 * Use __GFP_HIGH to avoid low memory issues when a device is
+	 * suspended and the ioctl is needed to resume it.
 	 * Use kmalloc() rather than vmalloc() when we can.
 	 */
 	dmi = NULL;
-	if (param_kernel->data_size <= KMALLOC_MAX_SIZE) {
-		dmi = kmalloc(param_kernel->data_size, GFP_NOIO | __GFP_NORETRY | __GFP_NOMEMALLOC | __GFP_NOWARN);
-		if (dmi)
-			*param_flags |= DM_PARAMS_KMALLOC;
-	}
-
-	if (!dmi) {
-		unsigned noio_flag;
-		noio_flag = memalloc_noio_save();
-		dmi = __vmalloc(param_kernel->data_size, GFP_NOIO | __GFP_REPEAT | __GFP_HIGH | __GFP_HIGHMEM, PAGE_KERNEL);
-		memalloc_noio_restore(noio_flag);
-		if (dmi)
-			*param_flags |= DM_PARAMS_VMALLOC;
-	}
+	noio_flag = memalloc_noio_save();
+	dmi = kvmalloc(param_kernel->data_size, GFP_KERNEL | __GFP_HIGH);
+	memalloc_noio_restore(noio_flag);
 
 	if (!dmi) {
 		if (secure_data && clear_user(user, param_kernel->data_size))
 			return -EFAULT;
 		return -ENOMEM;
 	}
+
+	*param_flags |= DM_PARAMS_MALLOC;
 
 	/* Copy from param_kernel (which was already copied from user) */
 	memcpy(dmi, param_kernel, minimum_data_size);

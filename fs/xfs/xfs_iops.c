@@ -414,12 +414,16 @@ xfs_vn_rename(
  * uio is kmalloced for this reason...
  */
 STATIC const char *
-xfs_vn_follow_link(
+xfs_vn_get_link(
 	struct dentry		*dentry,
-	void			**cookie)
+	struct inode		*inode,
+	struct delayed_call	*done)
 {
 	char			*link;
 	int			error = -ENOMEM;
+
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
 
 	link = kmalloc(MAXPATHLEN+1, GFP_KERNEL);
 	if (!link)
@@ -429,7 +433,8 @@ xfs_vn_follow_link(
 	if (unlikely(error))
 		goto out_kfree;
 
-	return *cookie = link;
+	set_delayed_call(done, kfree_link, link);
+	return link;
 
  out_kfree:
 	kfree(link);
@@ -1106,9 +1111,6 @@ static const struct inode_operations xfs_inode_operations = {
 	.set_acl		= xfs_set_acl,
 	.getattr		= xfs_vn_getattr,
 	.setattr		= xfs_vn_setattr,
-	.setxattr		= generic_setxattr,
-	.getxattr		= generic_getxattr,
-	.removexattr		= generic_removexattr,
 	.listxattr		= xfs_vn_listxattr,
 	.fiemap			= xfs_vn_fiemap,
 	.update_time		= xfs_vn_update_time,
@@ -1134,9 +1136,6 @@ static const struct inode_operations xfs_dir_inode_operations = {
 	.set_acl		= xfs_set_acl,
 	.getattr		= xfs_vn_getattr,
 	.setattr		= xfs_vn_setattr,
-	.setxattr		= generic_setxattr,
-	.getxattr		= generic_getxattr,
-	.removexattr		= generic_removexattr,
 	.listxattr		= xfs_vn_listxattr,
 	.update_time		= xfs_vn_update_time,
 	.tmpfile		= xfs_vn_tmpfile,
@@ -1162,9 +1161,6 @@ static const struct inode_operations xfs_dir_ci_inode_operations = {
 	.set_acl		= xfs_set_acl,
 	.getattr		= xfs_vn_getattr,
 	.setattr		= xfs_vn_setattr,
-	.setxattr		= generic_setxattr,
-	.getxattr		= generic_getxattr,
-	.removexattr		= generic_removexattr,
 	.listxattr		= xfs_vn_listxattr,
 	.update_time		= xfs_vn_update_time,
 	.tmpfile		= xfs_vn_tmpfile,
@@ -1172,13 +1168,9 @@ static const struct inode_operations xfs_dir_ci_inode_operations = {
 
 static const struct inode_operations xfs_symlink_inode_operations = {
 	.readlink		= generic_readlink,
-	.follow_link		= xfs_vn_follow_link,
-	.put_link		= kfree_put_link,
+	.get_link		= xfs_vn_get_link,
 	.getattr		= xfs_vn_getattr,
 	.setattr		= xfs_vn_setattr,
-	.setxattr		= generic_setxattr,
-	.getxattr		= generic_getxattr,
-	.removexattr		= generic_removexattr,
 	.listxattr		= xfs_vn_listxattr,
 	.update_time		= xfs_vn_update_time,
 };

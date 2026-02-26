@@ -215,7 +215,7 @@ void ovl_dentry_update(struct dentry *dentry, struct dentry *upperdentry)
 {
 	struct ovl_entry *oe = dentry->d_fsdata;
 
-	WARN_ON(!mutex_is_locked(&upperdentry->d_parent->d_inode->i_mutex));
+	WARN_ON(!inode_is_locked(upperdentry->d_parent->d_inode));
 	WARN_ON(oe->__upperdentry);
 	BUG_ON(!upperdentry->d_inode);
 	/*
@@ -230,7 +230,7 @@ void ovl_dentry_version_inc(struct dentry *dentry)
 {
 	struct ovl_entry *oe = dentry->d_fsdata;
 
-	WARN_ON(!mutex_is_locked(&dentry->d_inode->i_mutex));
+	WARN_ON(!inode_is_locked(dentry->d_inode));
 	oe->version++;
 }
 
@@ -238,7 +238,7 @@ u64 ovl_dentry_version_get(struct dentry *dentry)
 {
 	struct ovl_entry *oe = dentry->d_fsdata;
 
-	WARN_ON(!mutex_is_locked(&dentry->d_inode->i_mutex));
+	WARN_ON(!inode_is_locked(dentry->d_inode));
 	return oe->version;
 }
 
@@ -270,10 +270,10 @@ static bool ovl_is_opaquedir(struct dentry *dentry)
 	char val;
 	struct inode *inode = dentry->d_inode;
 
-	if (!S_ISDIR(inode->i_mode) || !inode->i_op->getxattr)
+	if (!S_ISDIR(inode->i_mode) || !(inode->i_opflags & IOP_XATTR))
 		return false;
 
-	res = inode->i_op->getxattr(dentry, OVL_XATTR_OPAQUE, &val, 1);
+	res = __vfs_getxattr(dentry, inode, OVL_XATTR_OPAQUE, &val, 1);
 	if (res == 1 && val == 'y')
 		return true;
 
@@ -411,9 +411,7 @@ static inline struct dentry *ovl_lookup_real(struct dentry *dir,
 {
 	struct dentry *dentry;
 
-	mutex_lock(&dir->d_inode->i_mutex);
-	dentry = lookup_one_len(name->name, dir, name->len);
-	mutex_unlock(&dir->d_inode->i_mutex);
+	dentry = lookup_one_len_unlocked(name->name, dir, name->len);
 
 	if (IS_ERR(dentry)) {
 		if (PTR_ERR(dentry) == -ENOENT)
@@ -794,7 +792,7 @@ static struct dentry *ovl_workdir_create(struct vfsmount *mnt,
 	if (err)
 		return ERR_PTR(err);
 
-	mutex_lock_nested(&dir->i_mutex, I_MUTEX_PARENT);
+	inode_lock_nested(dir, I_MUTEX_PARENT);
 retry:
 	work = lookup_one_len(OVL_WORKDIR_NAME, dentry,
 			      strlen(OVL_WORKDIR_NAME));
@@ -839,7 +837,7 @@ retry:
 			goto out_dput;
 	}
 out_unlock:
-	mutex_unlock(&dir->i_mutex);
+	inode_unlock(dir);
 	mnt_drop_write(mnt);
 
 	return work;

@@ -89,7 +89,6 @@ EXPORT_SYMBOL(dcache_dir_close);
 loff_t dcache_dir_lseek(struct file *file, loff_t offset, int whence)
 {
 	struct dentry *dentry = file->f_path.dentry;
-	mutex_lock(&d_inode(dentry)->i_mutex);
 	switch (whence) {
 		case 1:
 			offset += file->f_pos;
@@ -97,7 +96,6 @@ loff_t dcache_dir_lseek(struct file *file, loff_t offset, int whence)
 			if (offset >= 0)
 				break;
 		default:
-			mutex_unlock(&d_inode(dentry)->i_mutex);
 			return -EINVAL;
 	}
 	if (offset != file->f_pos) {
@@ -124,7 +122,6 @@ loff_t dcache_dir_lseek(struct file *file, loff_t offset, int whence)
 			spin_unlock(&dentry->d_lock);
 		}
 	}
-	mutex_unlock(&d_inode(dentry)->i_mutex);
 	return offset;
 }
 EXPORT_SYMBOL(dcache_dir_lseek);
@@ -190,7 +187,7 @@ const struct file_operations simple_dir_operations = {
 	.release	= dcache_dir_close,
 	.llseek		= dcache_dir_lseek,
 	.read		= generic_read_dir,
-	.iterate	= dcache_readdir,
+	.iterate_shared	= dcache_readdir,
 	.fsync		= noop_fsync,
 };
 EXPORT_SYMBOL(simple_dir_operations);
@@ -208,8 +205,8 @@ static const struct super_operations simple_super_operations = {
  * Common helper for pseudo-filesystems (sockfs, pipefs, bdev - stuff that
  * will never be mountable)
  */
-struct dentry *mount_pseudo(struct file_system_type *fs_type, char *name,
-	const struct super_operations *ops,
+struct dentry *mount_pseudo_xattr(struct file_system_type *fs_type, char *name,
+	const struct super_operations *ops, const struct xattr_handler **xattr,
 	const struct dentry_operations *dops, unsigned long magic)
 {
 	struct super_block *s;
@@ -226,6 +223,7 @@ struct dentry *mount_pseudo(struct file_system_type *fs_type, char *name,
 	s->s_blocksize_bits = PAGE_SHIFT;
 	s->s_magic = magic;
 	s->s_op = ops ? ops : &simple_super_operations;
+	s->s_xattr = xattr;
 	s->s_time_gran = 1;
 	root = new_inode(s);
 	if (!root)
@@ -253,7 +251,7 @@ Enomem:
 	deactivate_locked_super(s);
 	return ERR_PTR(-ENOMEM);
 }
-EXPORT_SYMBOL(mount_pseudo);
+EXPORT_SYMBOL(mount_pseudo_xattr);
 
 int simple_open(struct inode *inode, struct file *file)
 {
@@ -949,7 +947,7 @@ int __generic_file_fsync(struct file *file, loff_t start, loff_t end,
 	if (err)
 		return err;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	ret = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY_ALL))
 		goto out;
@@ -961,7 +959,7 @@ int __generic_file_fsync(struct file *file, loff_t start, loff_t end,
 		ret = err;
 
 out:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return ret;
 }
 EXPORT_SYMBOL(__generic_file_fsync);
@@ -1027,17 +1025,12 @@ int noop_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 }
 EXPORT_SYMBOL(noop_fsync);
 
-void kfree_put_link(struct inode *unused, void *cookie)
+/* Because kfree isn't assignment-compatible with void(void*) ;-/ */
+void kfree_link(void *p)
 {
-	kfree(cookie);
+	kfree(p);
 }
-EXPORT_SYMBOL(kfree_put_link);
-
-void free_page_put_link(struct inode *unused, void *cookie)
-{
-	free_page((unsigned long) cookie);
-}
-EXPORT_SYMBOL(free_page_put_link);
+EXPORT_SYMBOL(kfree_link);
 
 /*
  * nop .set_page_dirty method so that people can use .page_mkwrite on
@@ -1100,14 +1093,15 @@ simple_nosetlease(struct file *filp, long arg, struct file_lock **flp,
 }
 EXPORT_SYMBOL(simple_nosetlease);
 
-const char *simple_follow_link(struct dentry *dentry, void **cookie)
+const char *simple_get_link(struct dentry *dentry, struct inode *inode,
+			    struct delayed_call *done)
 {
-	return d_inode(dentry)->i_link;
+	return inode->i_link;
 }
-EXPORT_SYMBOL(simple_follow_link);
+EXPORT_SYMBOL(simple_get_link);
 
 const struct inode_operations simple_symlink_inode_operations = {
-	.follow_link = simple_follow_link,
+	.get_link = simple_get_link,
 	.readlink = generic_readlink
 };
 EXPORT_SYMBOL(simple_symlink_inode_operations);
@@ -1133,23 +1127,6 @@ static int empty_dir_setattr(struct dentry *dentry, struct iattr *attr)
 	return -EPERM;
 }
 
-static int empty_dir_setxattr(struct dentry *dentry, const char *name,
-			      const void *value, size_t size, int flags)
-{
-	return -EOPNOTSUPP;
-}
-
-static ssize_t empty_dir_getxattr(struct dentry *dentry, const char *name,
-				  void *value, size_t size)
-{
-	return -EOPNOTSUPP;
-}
-
-static int empty_dir_removexattr(struct dentry *dentry, const char *name)
-{
-	return -EOPNOTSUPP;
-}
-
 static ssize_t empty_dir_listxattr(struct dentry *dentry, char *list, size_t size)
 {
 	return -EOPNOTSUPP;
@@ -1160,9 +1137,6 @@ static const struct inode_operations empty_dir_inode_operations = {
 	.permission	= generic_permission,
 	.setattr	= empty_dir_setattr,
 	.getattr	= empty_dir_getattr,
-	.setxattr	= empty_dir_setxattr,
-	.getxattr	= empty_dir_getxattr,
-	.removexattr	= empty_dir_removexattr,
 	.listxattr	= empty_dir_listxattr,
 };
 
@@ -1181,7 +1155,7 @@ static int empty_dir_readdir(struct file *file, struct dir_context *ctx)
 static const struct file_operations empty_dir_operations = {
 	.llseek		= empty_dir_llseek,
 	.read		= generic_read_dir,
-	.iterate	= empty_dir_readdir,
+	.iterate_shared	= empty_dir_readdir,
 	.fsync		= noop_fsync,
 };
 
@@ -1198,6 +1172,7 @@ void make_empty_dir_inode(struct inode *inode)
 	inode->i_blocks = 0;
 
 	inode->i_op = &empty_dir_inode_operations;
+	inode->i_opflags &= ~IOP_XATTR;
 	inode->i_fop = &empty_dir_operations;
 }
 

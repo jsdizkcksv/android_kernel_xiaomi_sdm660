@@ -2370,13 +2370,19 @@ static void memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
  * Can't be called in interrupt context or from kernel threads.
  * This function needs to be called with rcu_read_lock() held.
  */
-struct kmem_cache *__memcg_kmem_get_cache(struct kmem_cache *cachep)
+struct kmem_cache *__memcg_kmem_get_cache(struct kmem_cache *cachep, gfp_t gfp)
 {
 	struct mem_cgroup *memcg;
 	struct kmem_cache *memcg_cachep;
 	int kmemcg_id;
 
 	VM_BUG_ON(!is_root_cache(cachep));
+
+	if (cachep->flags & SLAB_ACCOUNT)
+		gfp |= __GFP_ACCOUNT;
+
+	if (!(gfp & __GFP_ACCOUNT))
+		return cachep;
 
 	if (current->memcg_kmem_skip_account)
 		return cachep;
@@ -2469,6 +2475,7 @@ void __memcg_kmem_uncharge(struct page *page, int order)
 }
 #endif /* CONFIG_MEMCG_KMEM */
 
+#if 0
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 
 /*
@@ -2491,6 +2498,7 @@ void mem_cgroup_split_huge_fixup(struct page *head)
 		       HPAGE_PMD_NR);
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
+#endif
 
 #ifdef CONFIG_MEMCG_SWAP
 static void mem_cgroup_swap_statistics(struct mem_cgroup *memcg,
@@ -4576,7 +4584,7 @@ static struct page *mc_handle_swap_pte(struct vm_area_struct *vma,
 	 * Because lookup_swap_cache() updates some statistics counter,
 	 * we call find_get_page() with swapper_space directly.
 	 */
-	page = find_get_page(swap_address_space(ent), ent.val);
+	page = find_get_page(swap_address_space(ent), swp_offset(ent));
 	if (do_swap_account)
 		entry->val = ent.val;
 
@@ -4614,7 +4622,8 @@ static struct page *mc_handle_file_pte(struct vm_area_struct *vma,
 			swp_entry_t swp = radix_to_swp_entry(page);
 			if (do_swap_account)
 				*entry = swp;
-			page = find_get_page(swap_address_space(swp), swp.val);
+			page = find_get_page(swap_address_space(swp),
+					     swp_offset(swp));
 		}
 	} else
 		page = find_get_page(mapping, pgoff);
@@ -4768,6 +4777,7 @@ static enum mc_target_type get_mctgt_type(struct vm_area_struct *vma,
 	return ret;
 }
 
+#if 0
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 /*
  * We don't consider swapping or file mapped pages because THP does not
@@ -4800,6 +4810,13 @@ static inline enum mc_target_type get_mctgt_type_thp(struct vm_area_struct *vma,
 	return MC_TARGET_NONE;
 }
 #endif
+#endif
+
+static inline enum mc_target_type get_mctgt_type_thp(struct vm_area_struct *vma,
+		unsigned long addr, pmd_t pmd, union mc_target *target)
+{
+	return MC_TARGET_NONE;
+}
 
 static int mem_cgroup_count_precharge_pte_range(pmd_t *pmd,
 					unsigned long addr, unsigned long end,

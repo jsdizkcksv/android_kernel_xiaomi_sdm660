@@ -528,7 +528,8 @@ static int logfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
-	inode->i_op = &logfs_symlink_iops;
+	inode->i_op = &page_symlink_inode_operations;
+	inode_nohighmem(inode);
 	inode->i_mapping->a_ops = &logfs_reg_aops;
 
 	return __logfs_create(dir, dentry, inode, target, destlen);
@@ -776,12 +777,6 @@ fail:
 	return -EIO;
 }
 
-const struct inode_operations logfs_symlink_iops = {
-	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-	.put_link	= page_put_link,
-};
-
 const struct inode_operations logfs_dir_iops = {
 	.create		= logfs_create,
 	.link		= logfs_link,
@@ -796,7 +791,7 @@ const struct inode_operations logfs_dir_iops = {
 const struct file_operations logfs_dir_fops = {
 	.fsync		= logfs_fsync,
 	.unlocked_ioctl	= logfs_ioctl,
-	.iterate	= logfs_readdir,
+	.iterate_shared	= logfs_readdir,
 	.read		= generic_read_dir,
-	.llseek		= default_llseek,
+	.llseek		= generic_file_llseek,
 };

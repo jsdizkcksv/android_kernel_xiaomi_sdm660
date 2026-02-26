@@ -28,9 +28,6 @@ static const struct inode_operations kernfs_iops = {
 	.permission	= kernfs_iop_permission,
 	.setattr	= kernfs_iop_setattr,
 	.getattr	= kernfs_iop_getattr,
-	.setxattr	= kernfs_iop_setxattr,
-	.removexattr	= kernfs_iop_removexattr,
-	.getxattr	= kernfs_iop_getxattr,
 	.listxattr	= kernfs_iop_listxattr,
 };
 
@@ -112,7 +109,7 @@ int kernfs_setattr(struct kernfs_node *kn, const struct iattr *iattr)
 int kernfs_iop_setattr(struct dentry *dentry, struct iattr *iattr)
 {
 	struct inode *inode = d_inode(dentry);
-	struct kernfs_node *kn = inode->i_private;
+	struct kernfs_node *kn = dentry->d_fsdata;
 	int error;
 
 	if (!kn)
@@ -135,16 +132,11 @@ out:
 	return error;
 }
 
-static int kernfs_node_setsecdata(struct kernfs_node *kn, void **secdata,
+static int kernfs_node_setsecdata(struct kernfs_iattrs *attrs, void **secdata,
 				  u32 *secdata_len)
 {
-	struct kernfs_iattrs *attrs;
 	void *old_secdata;
 	size_t old_secdata_len;
-
-	attrs = kernfs_iattrs(kn);
-	if (!attrs)
-		return -ENOMEM;
 
 	old_secdata = attrs->ia_secdata;
 	old_secdata_len = attrs->ia_secdata_len;
@@ -157,80 +149,16 @@ static int kernfs_node_setsecdata(struct kernfs_node *kn, void **secdata,
 	return 0;
 }
 
-int kernfs_iop_setxattr(struct dentry *dentry, const char *name,
-			const void *value, size_t size, int flags)
-{
-	struct kernfs_node *kn = kernfs_dentry_node(dentry);
-	struct kernfs_iattrs *attrs;
-	void *secdata;
-	int error;
-	u32 secdata_len = 0;
-
-	attrs = kernfs_iattrs(kn);
-	if (!attrs)
-		return -ENOMEM;
-
-	if (!strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN)) {
-		const char *suffix = name + XATTR_SECURITY_PREFIX_LEN;
-		error = security_inode_setsecurity(d_inode(dentry), suffix,
-						value, size, flags);
-		if (error)
-			return error;
-		error = security_inode_getsecctx(d_inode(dentry),
-						&secdata, &secdata_len);
-		if (error)
-			return error;
-
-		mutex_lock(&kernfs_mutex);
-		error = kernfs_node_setsecdata(kn, &secdata, &secdata_len);
-		mutex_unlock(&kernfs_mutex);
-
-		if (secdata)
-			security_release_secctx(secdata, secdata_len);
-		return error;
-	} else if (!strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN)) {
-		return simple_xattr_set(&attrs->xattrs, name, value, size,
-					flags);
-	}
-
-	return -EINVAL;
-}
-
-int kernfs_iop_removexattr(struct dentry *dentry, const char *name)
-{
-	struct kernfs_node *kn = kernfs_dentry_node(dentry);
-	struct kernfs_iattrs *attrs;
-
-	attrs = kernfs_iattrs(kn);
-	if (!attrs)
-		return -ENOMEM;
-
-	return simple_xattr_remove(&attrs->xattrs, name);
-}
-
-ssize_t kernfs_iop_getxattr(struct dentry *dentry, const char *name, void *buf,
-			    size_t size)
-{
-	struct kernfs_node *kn = kernfs_dentry_node(dentry);
-	struct kernfs_iattrs *attrs;
-
-	attrs = kernfs_iattrs(kn);
-	if (!attrs)
-		return -ENOMEM;
-
-	return simple_xattr_get(&attrs->xattrs, name, buf, size);
-}
-
 ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size)
 {
-	struct kernfs_node *kn = kernfs_dentry_node(dentry);
+	struct kernfs_node *kn = dentry->d_fsdata;
 	struct kernfs_iattrs *attrs;
 
 	attrs = kernfs_iattrs(kn);
 	if (!attrs)
 		return -ENOMEM;
 
-	return simple_xattr_list(&attrs->xattrs, buf, size);
+	return simple_xattr_list(d_inode(dentry), &attrs->xattrs, buf, size);
 }
 
 static inline void set_default_inode_attr(struct inode *inode, umode_t mode)
@@ -270,8 +198,8 @@ static void kernfs_refresh_inode(struct kernfs_node *kn, struct inode *inode)
 int kernfs_iop_getattr(struct vfsmount *mnt, struct dentry *dentry,
 		   struct kstat *stat)
 {
+	struct kernfs_node *kn = dentry->d_fsdata;
 	struct inode *inode = d_inode(dentry);
-	struct kernfs_node *kn = inode->i_private;
 
 	mutex_lock(&kernfs_mutex);
 	kernfs_refresh_inode(kn, inode);
@@ -371,3 +299,83 @@ int kernfs_iop_permission(struct inode *inode, int mask)
 
 	return generic_permission(inode, mask);
 }
+
+static int kernfs_xattr_get(const struct xattr_handler *handler,
+			    struct dentry *unused, struct inode *inode,
+			    const char *suffix, void *value, size_t size)
+{
+	const char *name = xattr_full_name(handler, suffix);
+	struct kernfs_node *kn = inode->i_private;
+	struct kernfs_iattrs *attrs;
+
+	attrs = kernfs_iattrs(kn);
+	if (!attrs)
+		return -ENOMEM;
+
+	return simple_xattr_get(&attrs->xattrs, name, value, size);
+}
+
+static int kernfs_xattr_set(const struct xattr_handler *handler,
+			    struct dentry *unused, struct inode *inode,
+			    const char *suffix, const void *value,
+			    size_t size, int flags)
+{
+	const char *name = xattr_full_name(handler, suffix);
+	struct kernfs_node *kn = inode->i_private;
+	struct kernfs_iattrs *attrs;
+
+	attrs = kernfs_iattrs(kn);
+	if (!attrs)
+		return -ENOMEM;
+
+	return simple_xattr_set(&attrs->xattrs, name, value, size, flags);
+}
+
+const struct xattr_handler kernfs_trusted_xattr_handler = {
+	.prefix = XATTR_TRUSTED_PREFIX,
+	.get = kernfs_xattr_get,
+	.set = kernfs_xattr_set,
+};
+
+static int kernfs_security_xattr_set(const struct xattr_handler *handler,
+				     struct dentry *unused, struct inode *inode,
+				     const char *suffix, const void *value,
+				     size_t size, int flags)
+{
+	struct kernfs_node *kn = inode->i_private;
+	struct kernfs_iattrs *attrs;
+	void *secdata;
+	u32 secdata_len = 0;
+	int error;
+
+	attrs = kernfs_iattrs(kn);
+	if (!attrs)
+		return -ENOMEM;
+
+	error = security_inode_setsecurity(inode, suffix, value, size, flags);
+	if (error)
+		return error;
+	error = security_inode_getsecctx(inode, &secdata, &secdata_len);
+	if (error)
+		return error;
+
+	mutex_lock(&kernfs_mutex);
+	error = kernfs_node_setsecdata(attrs, &secdata, &secdata_len);
+	mutex_unlock(&kernfs_mutex);
+
+	if (secdata)
+		security_release_secctx(secdata, secdata_len);
+	return error;
+}
+
+const struct xattr_handler kernfs_security_xattr_handler = {
+	.prefix = XATTR_SECURITY_PREFIX,
+	.get = kernfs_xattr_get,
+	.set = kernfs_security_xattr_set,
+};
+
+const struct xattr_handler *kernfs_xattr_handlers[] = {
+	&kernfs_trusted_xattr_handler,
+	&kernfs_security_xattr_handler,
+	NULL
+};

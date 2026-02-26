@@ -1074,7 +1074,7 @@ v9fs_vfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	if (IS_ERR(st))
 		return PTR_ERR(st);
 
-	v9fs_stat2inode(st, d_inode(dentry), d_inode(dentry)->i_sb, 0);
+	v9fs_stat2inode(st, d_inode(dentry), dentry->d_sb, 0);
 	generic_fillattr(d_inode(dentry), stat);
 
 	p9stat_free(st);
@@ -1228,18 +1228,26 @@ ino_t v9fs_qid2ino(struct p9_qid *qid)
 }
 
 /**
- * v9fs_vfs_follow_link - follow a symlink path
+ * v9fs_vfs_get_link - follow a symlink path
  * @dentry: dentry for symlink
- * @cookie: place to pass the data to put_link()
+ * @inode: inode for symlink
+ * @done: delayed call for when we are done with the return value
  */
 
-static const char *v9fs_vfs_follow_link(struct dentry *dentry, void **cookie)
+static const char *v9fs_vfs_get_link(struct dentry *dentry,
+				     struct inode *inode,
+				     struct delayed_call *done)
 {
-	struct v9fs_session_info *v9ses = v9fs_dentry2v9ses(dentry);
-	struct p9_fid *fid = v9fs_fid_lookup(dentry);
+	struct v9fs_session_info *v9ses;
+	struct p9_fid *fid;
 	struct p9_wstat *st;
 	char *res;
 
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
+
+	v9ses = v9fs_dentry2v9ses(dentry);
+	fid = v9fs_fid_lookup(dentry);
 	p9_debug(P9_DEBUG_VFS, "%pd\n", dentry);
 
 	if (IS_ERR(fid))
@@ -1264,7 +1272,8 @@ static const char *v9fs_vfs_follow_link(struct dentry *dentry, void **cookie)
 
 	p9stat_free(st);
 	kfree(st);
-	return *cookie = res;
+	set_delayed_call(done, kfree_link, res);
+	return res;
 }
 
 /**
@@ -1454,8 +1463,7 @@ static const struct inode_operations v9fs_file_inode_operations = {
 
 static const struct inode_operations v9fs_symlink_inode_operations = {
 	.readlink = generic_readlink,
-	.follow_link = v9fs_vfs_follow_link,
-	.put_link = kfree_put_link,
+	.get_link = v9fs_vfs_get_link,
 	.getattr = v9fs_vfs_getattr,
 	.setattr = v9fs_vfs_setattr,
 };

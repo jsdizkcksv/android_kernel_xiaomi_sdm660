@@ -408,9 +408,10 @@ nfs_fhget(struct super_block *sb, struct nfs_fh *fh, struct nfs_fattr *fattr, st
 				inode->i_fop = NULL;
 				inode->i_flags |= S_AUTOMOUNT;
 			}
-		} else if (S_ISLNK(inode->i_mode))
+		} else if (S_ISLNK(inode->i_mode)) {
 			inode->i_op = &nfs_symlink_inode_operations;
-		else
+			inode_nohighmem(inode);
+		} else
 			init_special_inode(inode, inode->i_mode, fattr->rdev);
 
 		memset(&inode->i_atime, 0, sizeof(inode->i_atime));
@@ -654,9 +655,9 @@ int nfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 	trace_nfs_getattr_enter(inode);
 	/* Flush out writes to the server in order to update c/mtime.  */
 	if (S_ISREG(inode->i_mode)) {
-		mutex_lock(&inode->i_mutex);
+		inode_lock(inode);
 		err = nfs_sync_inode(inode);
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 		if (err)
 			goto out;
 	}
@@ -1087,6 +1088,27 @@ static bool nfs_mapping_need_revalidate_inode(struct inode *inode)
 		|| NFS_STALE(inode);
 }
 
+int nfs_revalidate_mapping_rcu(struct inode *inode)
+{
+	struct nfs_inode *nfsi = NFS_I(inode);
+	unsigned long *bitlock = &nfsi->flags;
+	int ret = 0;
+
+	if (IS_SWAPFILE(inode))
+		goto out;
+	if (nfs_mapping_need_revalidate_inode(inode)) {
+		ret = -ECHILD;
+		goto out;
+	}
+	spin_lock(&inode->i_lock);
+	if (test_bit(NFS_INO_INVALIDATING, bitlock) ||
+	    (nfsi->cache_validity & NFS_INO_INVALID_DATA))
+		ret = -ECHILD;
+	spin_unlock(&inode->i_lock);
+out:
+	return ret;
+}
+
 /**
  * __nfs_revalidate_mapping - Revalidate the pagecache
  * @inode - pointer to host inode
@@ -1145,9 +1167,9 @@ static int __nfs_revalidate_mapping(struct inode *inode,
 	spin_unlock(&inode->i_lock);
 	trace_nfs_invalidate_mapping_enter(inode);
 	if (may_lock) {
-		mutex_lock(&inode->i_mutex);
+		inode_lock(inode);
 		ret = nfs_invalidate_mapping(inode, mapping);
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 	} else
 		ret = nfs_invalidate_mapping(inode, mapping);
 	trace_nfs_invalidate_mapping_exit(inode, ret);
@@ -1925,9 +1947,7 @@ static void init_once(void *foo)
 	nfsi->nrequests = 0;
 	nfsi->commit_info.ncommit = 0;
 	atomic_set(&nfsi->commit_info.rpcs_out, 0);
-	atomic_set(&nfsi->silly_count, 1);
-	INIT_HLIST_HEAD(&nfsi->silly_list);
-	init_waitqueue_head(&nfsi->waitqueue);
+	init_rwsem(&nfsi->rmdir_sem);
 	nfs4_init_once(nfsi);
 }
 

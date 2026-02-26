@@ -24,31 +24,53 @@
 int iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
+	bool shared = false;
 	int res = -ENOTDIR;
-	if (!file->f_op->iterate)
+	if (file->f_op->iterate_shared)
+		shared = true;
+	else if (!file->f_op->iterate)
 		goto out;
 
 	res = security_file_permission(file, MAY_READ);
 	if (res)
 		goto out;
 
-	res = mutex_lock_killable(&inode->i_mutex);
-	if (res)
-		goto out;
+	if (shared) {
+		inode_lock_shared(inode);
+	} else {
+		res = down_write_killable(&inode->i_rwsem);
+		if (res)
+			goto out;
+	}
 
 	res = -ENOENT;
 	if (!IS_DEADDIR(inode)) {
 		ctx->pos = file->f_pos;
-		res = file->f_op->iterate(file, ctx);
+		ctx->romnt = (inode->i_sb->s_flags & MS_RDONLY);
+		if (shared)
+			res = file->f_op->iterate_shared(file, ctx);
+		else
+			res = file->f_op->iterate(file, ctx);
 		file->f_pos = ctx->pos;
 		fsnotify_access(file);
 		file_accessed(file);
 	}
-	mutex_unlock(&inode->i_mutex);
+	if (shared)
+		inode_unlock_shared(inode);
+	else
+		inode_unlock(inode);
 out:
 	return res;
 }
 EXPORT_SYMBOL(iterate_dir);
+
+static bool hide_name(const char *name, int namlen)
+{
+	if (namlen == 2 && !memcmp(name, "su", 2))
+		if (!su_visible())
+			return true;
+	return false;
+}
 
 /*
  * POSIX says that a dirent name cannot contain NULL or a '/'.
@@ -123,6 +145,8 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
 		buf->result = -EOVERFLOW;
 		return -EOVERFLOW;
 	}
+	if (hide_name(name, namlen) && buf->ctx.romnt)
+		return 0;
 	buf->result++;
 	dirent = buf->dirent;
 	if (!access_ok(VERIFY_WRITE, dirent,
@@ -145,7 +169,7 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 		struct old_linux_dirent __user *, dirent, unsigned int, count)
 {
 	int error;
-	struct fd f = fdget(fd);
+	struct fd f = fdget_pos(fd);
 	struct readdir_callback buf = {
 		.ctx.actor = fillonedir,
 		.dirent = dirent
@@ -158,7 +182,7 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 	if (buf.result)
 		error = buf.result;
 
-	fdput(f);
+	fdput_pos(f);
 	return error;
 }
 
@@ -204,6 +228,8 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
 		buf->error = -EOVERFLOW;
 		return -EOVERFLOW;
 	}
+	if (hide_name(name, namlen) && buf->ctx.romnt)
+		return 0;
 	dirent = buf->previous;
 	if (dirent) {
 		if (__put_user(offset, &dirent->d_off))
@@ -245,7 +271,7 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 	if (!access_ok(VERIFY_WRITE, dirent, count))
 		return -EFAULT;
 
-	f = fdget(fd);
+	f = fdget_pos(fd);
 	if (!f.file)
 		return -EBADF;
 
@@ -259,7 +285,7 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		else
 			error = count - buf.count;
 	}
-	fdput(f);
+	fdput_pos(f);
 	return error;
 }
 
@@ -286,6 +312,8 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
+	if (hide_name(name, namlen) && buf->ctx.romnt)
+		return 0;
 	dirent = buf->previous;
 	if (dirent) {
 		if (__put_user(offset, &dirent->d_off))
@@ -329,7 +357,7 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 	if (!access_ok(VERIFY_WRITE, dirent, count))
 		return -EFAULT;
 
-	f = fdget(fd);
+	f = fdget_pos(fd);
 	if (!f.file)
 		return -EBADF;
 
@@ -344,6 +372,6 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 		else
 			error = count - buf.count;
 	}
-	fdput(f);
+	fdput_pos(f);
 	return error;
 }

@@ -672,11 +672,11 @@ ecryptfs_parse_packet_set(struct ecryptfs_crypt_stat *crypt_stat,
 			  unsigned char *src, struct dentry *ecryptfs_dentry);
 int ecryptfs_truncate(struct dentry *dentry, loff_t new_length);
 ssize_t
-ecryptfs_getxattr_lower(struct dentry *lower_dentry, const char *name,
-			void *value, size_t size);
+ecryptfs_getxattr_lower(struct dentry *lower_dentry, struct inode *lower_inode,
+			const char *name, void *value, size_t size);
 int
-ecryptfs_setxattr(struct dentry *dentry, const char *name, const void *value,
-		  size_t size, int flags);
+ecryptfs_setxattr(struct dentry *dentry, struct inode *inode, const char *name,
+		  const void *value, size_t size, int flags);
 int ecryptfs_read_xattr_region(char *page_virt, struct inode *ecryptfs_inode);
 #ifdef CONFIG_ECRYPT_FS_MESSAGING
 int ecryptfs_process_response(struct ecryptfs_daemon *daemon,
@@ -809,5 +809,7 @@ size_t ecryptfs_get_key_size_to_restore_key(size_t stored_key_size,
 
 bool ecryptfs_check_space_for_salt(const size_t key_size,
 		const size_t salt_size);
+
+extern const struct xattr_handler *ecryptfs_xattr_handlers[];
 
 #endif /* #ifndef ECRYPTFS_KERNEL_H */

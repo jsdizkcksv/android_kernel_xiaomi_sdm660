@@ -40,7 +40,7 @@ static int jffs2_rename (struct inode *, struct dentry *,
 const struct file_operations jffs2_dir_operations =
 {
 	.read =		generic_read_dir,
-	.iterate =	jffs2_readdir,
+	.iterate_shared=jffs2_readdir,
 	.unlocked_ioctl=jffs2_ioctl,
 	.fsync =	jffs2_fsync,
 	.llseek =	generic_file_llseek,
@@ -61,10 +61,7 @@ const struct inode_operations jffs2_dir_inode_operations =
 	.get_acl =	jffs2_get_acl,
 	.set_acl =	jffs2_set_acl,
 	.setattr =	jffs2_setattr,
-	.setxattr =	jffs2_setxattr,
-	.getxattr =	jffs2_getxattr,
 	.listxattr =	jffs2_listxattr,
-	.removexattr =	jffs2_removexattr
 };
 
 /***********************************************************************/
@@ -241,7 +238,7 @@ static int jffs2_unlink(struct inode *dir_i, struct dentry *dentry)
 
 static int jffs2_link (struct dentry *old_dentry, struct inode *dir_i, struct dentry *dentry)
 {
-	struct jffs2_sb_info *c = JFFS2_SB_INFO(d_inode(old_dentry)->i_sb);
+	struct jffs2_sb_info *c = JFFS2_SB_INFO(old_dentry->d_sb);
 	struct jffs2_inode_info *f = JFFS2_INODE_INFO(d_inode(old_dentry));
 	struct jffs2_inode_info *dir_f = JFFS2_INODE_INFO(dir_i);
 	int ret;

@@ -519,13 +519,14 @@ static int sb_finish_set_opts(struct super_block *sb)
 		   the root directory.  -ENODATA is ok, as this may be
 		   the first boot of the SELinux kernel before we have
 		   assigned xattr values to the filesystem. */
-		if (!root_inode->i_op->getxattr) {
+		if (!(root_inode->i_opflags & IOP_XATTR)) {
 			printk(KERN_WARNING "SELinux: (dev %s, type %s) has no "
 			       "xattr support\n", sb->s_id, sb->s_type->name);
 			rc = -EOPNOTSUPP;
 			goto out;
 		}
-		rc = root_inode->i_op->getxattr(root, XATTR_NAME_SELINUX, NULL, 0);
+
+		rc = __vfs_getxattr(root, root_inode, XATTR_NAME_SELINUX, NULL, 0);
 		if (rc < 0 && rc != -ENODATA) {
 			if (rc == -EOPNOTSUPP)
 				printk(KERN_WARNING "SELinux: (dev %s, type "
@@ -1337,7 +1338,7 @@ static int selinux_genfs_get_sid(struct dentry *dentry,
 				 u32 *sid)
 {
 	int rc;
-	struct super_block *sb = dentry->d_inode->i_sb;
+	struct super_block *sb = dentry->d_sb;
 	char *buffer, *path;
 
 	buffer = (char *)__get_free_page(GFP_KERNEL);
@@ -1398,11 +1399,10 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 	case SECURITY_FS_USE_NATIVE:
 		break;
 	case SECURITY_FS_USE_XATTR:
-		if (!inode->i_op->getxattr) {
+		if (!(inode->i_opflags & IOP_XATTR)) {
 			isec->sid = sbsec->def_sid;
 			break;
 		}
-
 		/* Need a dentry, since the xattr API requires one.
 		   Life would be simpler if we could just pass the inode. */
 		if (opt_dentry) {
@@ -1433,14 +1433,12 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 			goto out_unlock;
 		}
 		context[len] = '\0';
-		rc = inode->i_op->getxattr(dentry, XATTR_NAME_SELINUX,
-					   context, len);
+		rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, context, len);
 		if (rc == -ERANGE) {
 			kfree(context);
 
 			/* Need a larger buffer.  Query for the right size. */
-			rc = inode->i_op->getxattr(dentry, XATTR_NAME_SELINUX,
-						   NULL, 0);
+			rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, NULL, 0);
 			if (rc < 0) {
 				dput(dentry);
 				goto out_unlock;
@@ -1453,9 +1451,7 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 				goto out_unlock;
 			}
 			context[len] = '\0';
-			rc = inode->i_op->getxattr(dentry,
-						   XATTR_NAME_SELINUX,
-						   context, len);
+			rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, context, len);
 		}
 		dput(dentry);
 		if (rc < 0) {
@@ -2793,7 +2789,7 @@ static int selinux_sb_statfs(struct dentry *dentry)
 }
 
 static int selinux_mount(const char *dev_name,
-			 struct path *path,
+			 const struct path *path,
 			 const char *type,
 			 unsigned long flags,
 			 void *data)

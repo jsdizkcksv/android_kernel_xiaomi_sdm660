@@ -100,6 +100,7 @@ static struct inode *get_cramfs_inode(struct super_block *sb,
 		break;
 	case S_IFLNK:
 		inode->i_op = &page_symlink_inode_operations;
+		inode_nohighmem(inode);
 		inode->i_data.a_ops = &cramfs_aops;
 		break;
 	default:
@@ -561,7 +562,7 @@ static const struct address_space_operations cramfs_aops = {
 static const struct file_operations cramfs_directory_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate	= cramfs_readdir,
+	.iterate_shared	= cramfs_readdir,
 };
 
 static const struct inode_operations cramfs_dir_inode_operations = {

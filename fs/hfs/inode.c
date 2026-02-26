@@ -15,6 +15,7 @@
 #include <linux/mpage.h>
 #include <linux/sched.h>
 #include <linux/uio.h>
+#include <linux/xattr.h>
 
 #include "hfs_fs.h"
 #include "btree.h"
@@ -187,6 +188,7 @@ struct inode *hfs_new_inode(struct inode *dir, struct qstr *name, umode_t mode)
 
 	mutex_init(&HFS_I(inode)->extents_lock);
 	INIT_LIST_HEAD(&HFS_I(inode)->open_dir_list);
+	spin_lock_init(&HFS_I(inode)->open_dir_lock);
 	hfs_cat_build_key(sb, (btree_key *)&HFS_I(inode)->cat_key, dir->i_ino, name);
 	inode->i_ino = HFS_SB(sb)->next_id++;
 	inode->i_mode = mode;
@@ -318,6 +320,7 @@ static int hfs_read_inode(struct inode *inode, void *data)
 	HFS_I(inode)->rsrc_inode = NULL;
 	mutex_init(&HFS_I(inode)->extents_lock);
 	INIT_LIST_HEAD(&HFS_I(inode)->open_dir_list);
+	spin_lock_init(&HFS_I(inode)->open_dir_lock);
 
 	/* Initialize the inode */
 	inode->i_uid = hsb->s_uid;
@@ -570,13 +573,13 @@ static int hfs_file_release(struct inode *inode, struct file *file)
 	if (HFS_IS_RSRC(inode))
 		inode = HFS_I(inode)->rsrc_inode;
 	if (atomic_dec_and_test(&HFS_I(inode)->opencnt)) {
-		mutex_lock(&inode->i_mutex);
+		inode_lock(inode);
 		hfs_file_truncate(inode);
 		//if (inode->i_flags & S_DEAD) {
 		//	hfs_delete_cat(inode->i_ino, HFSPLUS_SB(sb).hidden_dir, NULL);
 		//	hfs_delete_inode(inode);
 		//}
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 	}
 	return 0;
 }
@@ -656,7 +659,7 @@ static int hfs_file_fsync(struct file *filp, loff_t start, loff_t end,
 	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (ret)
 		return ret;
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	/* sync the inode to buffers */
 	ret = write_inode_now(inode, 0);
@@ -668,7 +671,7 @@ static int hfs_file_fsync(struct file *filp, loff_t start, loff_t end,
 	err = sync_blockdev(sb->s_bdev);
 	if (!ret)
 		ret = err;
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return ret;
 }
 
@@ -686,7 +689,5 @@ static const struct file_operations hfs_file_operations = {
 static const struct inode_operations hfs_file_inode_operations = {
 	.lookup		= hfs_file_lookup,
 	.setattr	= hfs_inode_setattr,
-	.setxattr	= hfs_setxattr,
-	.getxattr	= hfs_getxattr,
-	.listxattr	= hfs_listxattr,
+	.listxattr	= generic_listxattr,
 };

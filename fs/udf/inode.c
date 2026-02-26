@@ -261,7 +261,7 @@ int udf_expand_file_adinicb(struct inode *inode)
 	struct udf_inode_info *iinfo = UDF_I(inode);
 	int err;
 
-	WARN_ON_ONCE(!mutex_is_locked(&inode->i_mutex));
+	WARN_ON_ONCE(!inode_is_locked(inode));
 	if (!iinfo->i_lenAlloc) {
 		if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
 			iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
@@ -1575,7 +1575,8 @@ reread:
 		break;
 	case ICBTAG_FILE_TYPE_SYMLINK:
 		inode->i_data.a_ops = &udf_symlink_aops;
-		inode->i_op = &udf_symlink_inode_operations;
+		inode->i_op = &page_symlink_inode_operations;
+		inode_nohighmem(inode);
 		inode->i_mode = S_IFLNK | S_IRWXUGO;
 		break;
 	case ICBTAG_FILE_TYPE_MAIN:

@@ -154,7 +154,7 @@ static void configfs_set_inode_lock_class(struct configfs_dirent *sd,
 
 	if (depth > 0) {
 		if (depth <= ARRAY_SIZE(default_group_class)) {
-			lockdep_set_class(&inode->i_mutex,
+			lockdep_set_class(&inode->i_rwsem,
 					  &default_group_class[depth - 1]);
 		} else {
 			/*
@@ -199,9 +199,17 @@ int configfs_create(struct dentry * dentry, umode_t mode, void (*init)(struct in
 	configfs_set_inode_lock_class(sd, inode);
 
 	init(inode);
-	d_instantiate(dentry, inode);
-	if (S_ISDIR(mode) || S_ISLNK(mode))
+	if (S_ISDIR(mode) || S_ISLNK(mode)) {
+		/*
+		 * ->symlink(), ->mkdir(), configfs_register_subsystem() or
+		 * create_default_group() - already hashed.
+		 */
+		d_instantiate(dentry, inode);
 		dget(dentry);  /* pin link and directory dentries in core */
+	} else {
+		/* ->lookup() */
+		d_add(dentry, inode);
+	}
 	return error;
 }
 
@@ -255,7 +263,7 @@ void configfs_hash_and_remove(struct dentry * dir, const char * name)
 		/* no inode means this hasn't been made visible yet */
 		return;
 
-	mutex_lock(&d_inode(dir)->i_mutex);
+	inode_lock(d_inode(dir));
 	list_for_each_entry(sd, &parent_sd->s_children, s_sibling) {
 		if (!sd->s_element)
 			continue;
@@ -268,5 +276,5 @@ void configfs_hash_and_remove(struct dentry * dir, const char * name)
 			break;
 		}
 	}
-	mutex_unlock(&d_inode(dir)->i_mutex);
+	inode_unlock(d_inode(dir));
 }

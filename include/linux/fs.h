@@ -32,6 +32,7 @@
 #include <linux/blk_types.h>
 #include <linux/workqueue.h>
 #include <linux/percpu-rwsem.h>
+#include <linux/delayed_call.h>
 
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
@@ -467,11 +468,13 @@ struct address_space {
 	struct rw_semaphore	i_mmap_rwsem;	/* protect tree, count, list */
 	/* Protected by tree_lock together with the radix tree */
 	unsigned long		nrpages;	/* number of total pages */
-	unsigned long		nrshadows;	/* number of shadow entries */
+	/* number of shadow or DAX exceptional entries */
+	unsigned long		nrexceptional;
 	pgoff_t			writeback_index;/* writeback starts here */
 	const struct address_space_operations *a_ops;	/* methods */
-	unsigned long		flags;		/* error bits/gfp mask */
+	unsigned long		flags;		/* error bits */
 	spinlock_t		private_lock;	/* for use by the address_space */
+	gfp_t			gfp_mask;	/* implicit gfp mask for allocations */
 	struct list_head	private_list;	/* ditto */
 	void			*private_data;	/* ditto */
 } __attribute__((aligned(sizeof(long))));
@@ -608,9 +611,22 @@ static inline void mapping_allow_writable(struct address_space *mapping)
 struct posix_acl;
 #define ACL_NOT_CACHED ((void *)(-1))
 
+static inline struct posix_acl *
+uncached_acl_sentinel(struct task_struct *task)
+{
+	return (void *)task + 1;
+}
+
+static inline bool
+is_uncached_acl(struct posix_acl *acl)
+{
+	return (long)acl & 1;
+}
+
 #define IOP_FASTPERM	0x0001
 #define IOP_LOOKUP	0x0002
 #define IOP_NOFOLLOW	0x0004
+#define IOP_XATTR	0x0008
 
 /*
  * Keep mostly read-only and often accessed (especially for
@@ -667,7 +683,7 @@ struct inode {
 
 	/* Misc */
 	unsigned long		i_state;
-	struct mutex		i_mutex;
+	struct rw_semaphore	i_rwsem;
 
 	unsigned long		dirtied_when;	/* jiffies of first dirtying */
 	unsigned long		dirtied_time_when;
@@ -705,6 +721,7 @@ struct inode {
 		struct block_device	*i_bdev;
 		struct cdev		*i_cdev;
 		char			*i_link;
+		unsigned		i_dir_seq;
 	};
 
 	__u32			i_generation;
@@ -758,27 +775,42 @@ enum inode_i_mutex_lock_class
 
 static inline void inode_lock(struct inode *inode)
 {
-	mutex_lock(&inode->i_mutex);
+	down_write(&inode->i_rwsem);
 }
 
 static inline void inode_unlock(struct inode *inode)
 {
-	mutex_unlock(&inode->i_mutex);
+	up_write(&inode->i_rwsem);
+}
+
+static inline void inode_lock_shared(struct inode *inode)
+{
+	down_read(&inode->i_rwsem);
+}
+
+static inline void inode_unlock_shared(struct inode *inode)
+{
+	up_read(&inode->i_rwsem);
 }
 
 static inline int inode_trylock(struct inode *inode)
 {
-	return mutex_trylock(&inode->i_mutex);
+	return down_write_trylock(&inode->i_rwsem);
+}
+
+static inline int inode_trylock_shared(struct inode *inode)
+{
+	return down_read_trylock(&inode->i_rwsem);
 }
 
 static inline int inode_is_locked(struct inode *inode)
 {
-	return mutex_is_locked(&inode->i_mutex);
+	return rwsem_is_locked(&inode->i_rwsem);
 }
 
 static inline void inode_lock_nested(struct inode *inode, unsigned subclass)
 {
-	mutex_lock_nested(&inode->i_mutex, subclass);
+	down_write_nested(&inode->i_rwsem, subclass);
 }
 
 void lock_two_nondirectories(struct inode *, struct inode*);
@@ -1327,6 +1359,33 @@ extern int send_sigurg(struct fown_struct *fown);
 struct mm_struct;
 
 /*
+ * sb->s_flags.  Note that these mirror the equivalent MS_* flags where
+ * represented in both.
+ */
+#define SB_RDONLY	 1	/* Mount read-only */
+#define SB_NOSUID	 2	/* Ignore suid and sgid bits */
+#define SB_NODEV	 4	/* Disallow access to device special files */
+#define SB_NOEXEC	 8	/* Disallow program execution */
+#define SB_SYNCHRONOUS	16	/* Writes are synced at once */
+#define SB_MANDLOCK	64	/* Allow mandatory locks on an FS */
+#define SB_DIRSYNC	128	/* Directory modifications are synchronous */
+#define SB_NOATIME	1024	/* Do not update access times. */
+#define SB_NODIRATIME	2048	/* Do not update directory access times */
+#define SB_SILENT	32768
+#define SB_POSIXACL	(1<<16)	/* VFS does not apply the umask */
+#define SB_KERNMOUNT	(1<<22) /* this is a kern_mount call */
+#define SB_I_VERSION	(1<<23) /* Update inode I_version field */
+#define SB_LAZYTIME	(1<<25) /* Update the on-disk [acm]times lazily */
+
+/* These sb flags are internal to the kernel */
+#define SB_SUBMOUNT     (1<<26)
+#define SB_NOREMOTELOCK	(1<<27)
+#define SB_NOSEC	(1<<28)
+#define SB_BORN		(1<<29)
+#define SB_ACTIVE	(1<<30)
+#define SB_NOUSER	(1<<31)
+
+/*
  *	Umount options
  */
 
@@ -1618,11 +1677,6 @@ extern int vfs_rename2(struct vfsmount *, struct inode *, struct dentry *, struc
 extern int vfs_whiteout(struct inode *, struct dentry *);
 
 /*
- * VFS dentry helper functions.
- */
-extern void dentry_unhash(struct dentry *dentry);
-
-/*
  * VFS file helper functions.
  */
 extern void inode_init_owner(struct inode *inode, const struct inode *dir,
@@ -1670,6 +1724,7 @@ typedef int (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64,
 struct dir_context {
 	const filldir_t actor;
 	loff_t pos;
+	bool romnt;
 };
 
 struct block_device_operations;
@@ -1710,6 +1765,7 @@ struct file_operations {
 	ssize_t (*read_iter) (struct kiocb *, struct iov_iter *);
 	ssize_t (*write_iter) (struct kiocb *, struct iov_iter *);
 	int (*iterate) (struct file *, struct dir_context *);
+	int (*iterate_shared) (struct file *, struct dir_context *);
 	unsigned int (*poll) (struct file *, struct poll_table_struct *);
 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
@@ -1738,13 +1794,12 @@ struct file_operations {
 
 struct inode_operations {
 	struct dentry * (*lookup) (struct inode *,struct dentry *, unsigned int);
-	const char * (*follow_link) (struct dentry *, void **);
+	const char * (*get_link) (struct dentry *, struct inode *, struct delayed_call *);
 	int (*permission) (struct inode *, int);
 	int (*permission2) (struct vfsmount *, struct inode *, int);
 	struct posix_acl * (*get_acl)(struct inode *, int);
 
 	int (*readlink) (struct dentry *, char __user *,int);
-	void (*put_link) (struct inode *, void *);
 
 	int (*create) (struct inode *,struct dentry *, umode_t, bool);
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
@@ -1760,10 +1815,7 @@ struct inode_operations {
 	int (*setattr) (struct dentry *, struct iattr *);
 	int (*setattr2) (struct vfsmount *, struct dentry *, struct iattr *);
 	int (*getattr) (struct vfsmount *mnt, struct dentry *, struct kstat *);
-	int (*setxattr) (struct dentry *, const char *,const void *,size_t,int);
-	ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
-	int (*removexattr) (struct dentry *, const char *);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start,
 		      u64 len);
 	int (*update_time)(struct inode *, struct timespec *, int);
@@ -1842,11 +1894,16 @@ struct super_operations {
 #define S_IMA		1024	/* Inode has an associated IMA struct */
 #define S_AUTOMOUNT	2048	/* Automount/referral quasi-directory */
 #define S_NOSEC		4096	/* no suid or xattr security attributes */
+
+#if 0
 #ifdef CONFIG_FS_DAX
 #define S_DAX		8192	/* Direct Access, avoiding the page cache */
 #else
 #define S_DAX		0	/* Make all the DAX code disappear */
 #endif
+#endif
+
+#define S_DAX		0	/* Make all the DAX code disappear */
 #define S_ENCRYPTED	16384	/* Encrypted file (using fs/crypto/) */
 
 /*
@@ -1855,7 +1912,7 @@ struct super_operations {
  * possible to override it selectively if you really wanted to with some
  * ioctl() that is not currently implemented.
  *
- * Exception: MS_RDONLY is always applied to the entire file system.
+ * Exception: SB_RDONLY is always applied to the entire file system.
  *
  * Unfortunately, it is possible to change a filesystems flags with it mounted
  * with files in use.  This means that all of the inodes will not have their
@@ -1867,16 +1924,16 @@ struct super_operations {
 #define IS_RDONLY(inode)	((inode)->i_sb->s_flags & MS_RDONLY)
 #define IS_SYNC(inode)		(__IS_FLG(inode, MS_SYNCHRONOUS) || \
 					((inode)->i_flags & S_SYNC))
-#define IS_DIRSYNC(inode)	(__IS_FLG(inode, MS_SYNCHRONOUS|MS_DIRSYNC) || \
+#define IS_DIRSYNC(inode)	(__IS_FLG(inode, SB_SYNCHRONOUS|SB_DIRSYNC) || \
 					((inode)->i_flags & (S_SYNC|S_DIRSYNC)))
-#define IS_MANDLOCK(inode)	__IS_FLG(inode, MS_MANDLOCK)
-#define IS_NOATIME(inode)	__IS_FLG(inode, MS_RDONLY|MS_NOATIME)
-#define IS_I_VERSION(inode)	__IS_FLG(inode, MS_I_VERSION)
+#define IS_MANDLOCK(inode)	__IS_FLG(inode, SB_MANDLOCK)
+#define IS_NOATIME(inode)	__IS_FLG(inode, SB_RDONLY|SB_NOATIME)
+#define IS_I_VERSION(inode)	__IS_FLG(inode, SB_I_VERSION)
 
 #define IS_NOQUOTA(inode)	((inode)->i_flags & S_NOQUOTA)
 #define IS_APPEND(inode)	((inode)->i_flags & S_APPEND)
 #define IS_IMMUTABLE(inode)	((inode)->i_flags & S_IMMUTABLE)
-#define IS_POSIXACL(inode)	__IS_FLG(inode, MS_POSIXACL)
+#define IS_POSIXACL(inode)	__IS_FLG(inode, SB_POSIXACL)
 
 #define IS_DEADDIR(inode)	((inode)->i_flags & S_DEAD)
 #define IS_NOCMTIME(inode)	((inode)->i_flags & S_NOCMTIME)
@@ -2099,10 +2156,19 @@ struct super_block *sget(struct file_system_type *type,
 			int (*test)(struct super_block *,void *),
 			int (*set)(struct super_block *,void *),
 			int flags, void *data);
-extern struct dentry *mount_pseudo(struct file_system_type *, char *,
-	const struct super_operations *ops,
-	const struct dentry_operations *dops,
-	unsigned long);
+extern struct dentry *mount_pseudo_xattr(struct file_system_type *, char *,
+					 const struct super_operations *ops,
+					 const struct xattr_handler **xattr,
+					 const struct dentry_operations *dops,
+					 unsigned long);
+
+static inline struct dentry *
+mount_pseudo(struct file_system_type *fs_type, char *name,
+	     const struct super_operations *ops,
+	     const struct dentry_operations *dops, unsigned long magic)
+{
+	return mount_pseudo_xattr(fs_type, name, ops, NULL, dops, magic);
+}
 
 /* Alas, no aliases. Too much hassle with bringing module.h everywhere */
 #define fops_get(fops) \
@@ -2171,7 +2237,7 @@ static inline int __mandatory_lock(struct inode *ino)
 }
 
 /*
- * ... and these candidates should be on MS_MANDLOCK mounted fs,
+ * ... and these candidates should be on SB_MANDLOCK mounted fs,
  * otherwise these will be advisory locks
  */
 
@@ -2333,7 +2399,7 @@ struct filename {
 	const char		iname[];
 };
 
-extern long vfs_truncate(struct path *, loff_t);
+extern long vfs_truncate(const struct path *, loff_t);
 extern int do_truncate(struct dentry *, loff_t start, unsigned int time_attrs,
 		       struct file *filp);
 extern int do_truncate2(struct vfsmount *, struct dentry *, loff_t start,
@@ -2872,14 +2938,14 @@ extern const struct file_operations generic_ro_fops;
 
 extern int readlink_copy(char __user *, int, const char *);
 extern int page_readlink(struct dentry *, char __user *, int);
-extern const char *page_follow_link_light(struct dentry *, void **);
-extern void page_put_link(struct inode *, void *);
+extern const char *page_get_link(struct dentry *, struct inode *,
+				 struct delayed_call *);
+extern void page_put_link(void *);
 extern int __page_symlink(struct inode *inode, const char *symname, int len,
 		int nofs);
 extern int page_symlink(struct inode *inode, const char *symname, int len);
 extern const struct inode_operations page_symlink_inode_operations;
-extern void kfree_put_link(struct inode *, void *);
-extern void free_page_put_link(struct inode *, void *);
+extern void kfree_link(void *);
 extern int generic_readlink(struct dentry *, char __user *, int);
 extern void generic_fillattr(struct inode *, struct kstat *);
 int vfs_getattr_nosec(struct path *path, struct kstat *stat);
@@ -2890,7 +2956,8 @@ void __inode_sub_bytes(struct inode *inode, loff_t bytes);
 void inode_sub_bytes(struct inode *inode, loff_t bytes);
 loff_t inode_get_bytes(struct inode *inode);
 void inode_set_bytes(struct inode *inode, loff_t bytes);
-const char *simple_follow_link(struct dentry *, void **);
+const char *simple_get_link(struct dentry *, struct inode *,
+			    struct delayed_call *);
 extern const struct inode_operations simple_symlink_inode_operations;
 
 extern int iterate_dir(struct file *, struct dir_context *);
@@ -3115,7 +3182,7 @@ static inline int check_sticky(struct inode *dir, struct inode *inode)
 
 static inline void inode_has_no_xattr(struct inode *inode)
 {
-	if (!is_sxid(inode->i_mode) && (inode->i_sb->s_flags & MS_NOSEC))
+	if (!is_sxid(inode->i_mode) && (inode->i_sb->s_flags & SB_NOSEC))
 		inode->i_flags |= S_NOSEC;
 }
 
@@ -3158,6 +3225,13 @@ static inline bool dir_relax(struct inode *inode)
 {
 	inode_unlock(inode);
 	inode_lock(inode);
+	return !IS_DEADDIR(inode);
+}
+
+static inline bool dir_relax_shared(struct inode *inode)
+{
+	inode_unlock_shared(inode);
+	inode_lock_shared(inode);
 	return !IS_DEADDIR(inode);
 }
 

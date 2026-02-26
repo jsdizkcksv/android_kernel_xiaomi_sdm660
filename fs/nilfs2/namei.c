@@ -161,6 +161,7 @@ static int nilfs_symlink(struct inode *dir, struct dentry *dentry,
 
 	/* slow symlink */
 	inode->i_op = &nilfs_symlink_inode_operations;
+	inode_nohighmem(inode);
 	inode->i_mapping->a_ops = &nilfs_aops;
 	err = page_symlink(inode, symname, l);
 	if (err)
@@ -456,7 +457,7 @@ static struct dentry *nilfs_get_parent(struct dentry *child)
 
 	root = NILFS_I(d_inode(child))->i_root;
 
-	inode = nilfs_iget(d_inode(child)->i_sb, root, ino);
+	inode = nilfs_iget(child->d_sb, root, ino);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -568,8 +569,7 @@ const struct inode_operations nilfs_special_inode_operations = {
 
 const struct inode_operations nilfs_symlink_inode_operations = {
 	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-	.put_link	= page_put_link,
+	.get_link	= page_get_link,
 	.permission     = nilfs_permission,
 };
 

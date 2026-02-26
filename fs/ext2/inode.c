@@ -1101,8 +1101,10 @@ static void __ext2_truncate_blocks(struct inode *inode, loff_t offset)
 	blocksize = inode->i_sb->s_blocksize;
 	iblock = (offset + blocksize-1) >> EXT2_BLOCK_SIZE_BITS(inode->i_sb);
 
+#if 0
 #ifdef CONFIG_FS_DAX
 	WARN_ON(!rwsem_is_locked(&ei->dax_sem));
+#endif
 #endif
 
 	n = ext2_block_to_path(inode, iblock, offsets, NULL);
@@ -1410,6 +1412,7 @@ struct inode *ext2_iget (struct super_block *sb, unsigned long ino)
 				sizeof(ei->i_data) - 1);
 		} else {
 			inode->i_op = &ext2_symlink_inode_operations;
+			inode_nohighmem(inode);
 			if (test_opt(inode->i_sb, NOBH))
 				inode->i_mapping->a_ops = &ext2_nobh_aops;
 			else

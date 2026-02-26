@@ -187,6 +187,12 @@ enum {
  * protected by swap_info_struct.lock.
  */
 struct swap_cluster_info {
+	spinlock_t lock;	/*
+				 * Protect swap_cluster_info fields
+				 * and swap_info_struct->swap_map
+				 * elements correspond to the swap
+				 * cluster
+				 */
 	unsigned int data:24;
 	unsigned int flags:8;
 };
@@ -257,39 +263,7 @@ struct swap_info_struct {
 void *workingset_eviction(struct address_space *mapping, struct page *page);
 bool workingset_refault(void *shadow);
 void workingset_activation(struct page *page);
-extern struct list_lru workingset_shadow_nodes;
-
-static inline unsigned int workingset_node_pages(struct radix_tree_node *node)
-{
-	return node->count & RADIX_TREE_COUNT_MASK;
-}
-
-static inline void workingset_node_pages_inc(struct radix_tree_node *node)
-{
-	node->count++;
-}
-
-static inline void workingset_node_pages_dec(struct radix_tree_node *node)
-{
-	VM_WARN_ON_ONCE(!workingset_node_pages(node));
-	node->count--;
-}
-
-static inline unsigned int workingset_node_shadows(struct radix_tree_node *node)
-{
-	return node->count >> RADIX_TREE_COUNT_SHIFT;
-}
-
-static inline void workingset_node_shadows_inc(struct radix_tree_node *node)
-{
-	node->count += 1U << RADIX_TREE_COUNT_SHIFT;
-}
-
-static inline void workingset_node_shadows_dec(struct radix_tree_node *node)
-{
-	VM_WARN_ON_ONCE(!workingset_node_shadows(node));
-	node->count -= 1U << RADIX_TREE_COUNT_SHIFT;
-}
+void workingset_update_node(struct radix_tree_node *node, void *private);
 
 /* linux/mm/page_alloc.c */
 extern unsigned long totalreserve_pages;
@@ -399,8 +373,13 @@ int generic_swapfile_activate(struct swap_info_struct *, struct file *,
 		sector_t *);
 
 /* linux/mm/swap_state.c */
-extern struct address_space swapper_spaces[];
-#define swap_address_space(entry) (&swapper_spaces[swp_type(entry)])
+/* One swap address space for each 64M swap space */
+#define SWAP_ADDRESS_SPACE_SHIFT	14
+#define SWAP_ADDRESS_SPACE_PAGES	(1 << SWAP_ADDRESS_SPACE_SHIFT)
+extern struct address_space *swapper_spaces[];
+#define swap_address_space(entry)			    \
+	(&swapper_spaces[swp_type(entry)][swp_offset(entry) \
+		>> SWAP_ADDRESS_SPACE_SHIFT])
 extern unsigned long total_swapcache_pages(void);
 extern void show_swap_cache_info(void);
 extern int add_to_swap(struct page *, struct list_head *list);
@@ -462,6 +441,8 @@ extern struct swap_info_struct *page_swap_info(struct page *);
 extern int reuse_swap_page(struct page *);
 extern int try_to_free_swap(struct page *);
 struct backing_dev_info;
+extern int init_swap_address_space(unsigned int type, unsigned long nr_pages);
+extern void exit_swap_address_space(unsigned int type);
 
 #else /* CONFIG_SWAP */
 

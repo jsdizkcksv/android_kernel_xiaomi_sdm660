@@ -1793,11 +1793,15 @@ static int proc_exe_link(struct dentry *dentry, struct path *exe_path)
 		return -ENOENT;
 }
 
-static const char *proc_pid_follow_link(struct dentry *dentry, void **cookie)
+static const char *proc_pid_get_link(struct dentry *dentry,
+				     struct inode *inode,
+				     struct delayed_call *done)
 {
-	struct inode *inode = d_inode(dentry);
 	struct path path;
 	int error = -EACCES;
+
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
 
 	/* Are we allowed to snoop on the tasks file descriptors? */
 	if (!proc_fd_access_allowed(inode))
@@ -1859,7 +1863,7 @@ out:
 
 const struct inode_operations proc_pid_link_inode_operations = {
 	.readlink	= proc_pid_readlink,
-	.follow_link	= proc_pid_follow_link,
+	.get_link	= proc_pid_get_link,
 	.setattr	= proc_setattr,
 };
 
@@ -2036,12 +2040,17 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 
 	child = d_hash_and_lookup(dir, &qname);
 	if (!child) {
-		child = d_alloc(dir, &qname);
-		if (!child)
+		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+		child = d_alloc_parallel(dir, &qname, &wq);
+		if (IS_ERR(child))
 			goto end_instantiate;
-		if (instantiate(d_inode(dir), child, task, ptr) < 0) {
-			dput(child);
-			goto end_instantiate;
+		if (d_in_lookup(child)) {
+			int err = instantiate(d_inode(dir), child, task, ptr);
+			d_lookup_done(child);
+			if (err < 0) {
+				dput(child);
+				goto end_instantiate;
+			}
 		}
 	}
 	inode = d_inode(child);
@@ -2149,7 +2158,7 @@ static const struct dentry_operations tid_map_files_dentry_operations = {
 	.d_delete	= pid_delete_dentry,
 };
 
-static int proc_map_files_get_link(struct dentry *dentry, struct path *path)
+static int map_files_get_link(struct dentry *dentry, struct path *path)
 {
 	unsigned long vm_start, vm_end;
 	struct vm_area_struct *vma;
@@ -2199,20 +2208,22 @@ struct map_files_info {
  * path to the file in question.
  */
 static const char *
-proc_map_files_follow_link(struct dentry *dentry, void **cookie)
+proc_map_files_get_link(struct dentry *dentry,
+			struct inode *inode,
+		        struct delayed_call *done)
 {
 	if (!capable(CAP_SYS_ADMIN))
 		return ERR_PTR(-EPERM);
 
-	return proc_pid_follow_link(dentry, NULL);
+	return proc_pid_get_link(dentry, inode, done);
 }
 
 /*
- * Identical to proc_pid_link_inode_operations except for follow_link()
+ * Identical to proc_pid_link_inode_operations except for get_link()
  */
 static const struct inode_operations proc_map_files_link_inode_operations = {
 	.readlink	= proc_pid_readlink,
-	.follow_link	= proc_map_files_follow_link,
+	.get_link	= proc_map_files_get_link,
 	.setattr	= proc_setattr,
 };
 
@@ -2229,7 +2240,7 @@ proc_map_files_instantiate(struct inode *dir, struct dentry *dentry,
 		return -ENOENT;
 
 	ei = PROC_I(inode);
-	ei->op.proc_get_link = proc_map_files_get_link;
+	ei->op.proc_get_link = map_files_get_link;
 
 	inode->i_op = &proc_map_files_link_inode_operations;
 	inode->i_size = 64;
@@ -2394,8 +2405,8 @@ out:
 
 static const struct file_operations proc_map_files_operations = {
 	.read		= generic_read_dir,
-	.iterate	= proc_map_files_readdir,
-	.llseek		= default_llseek,
+	.iterate_shared	= proc_map_files_readdir,
+	.llseek		= generic_file_llseek,
 };
 
 struct timers_private {
@@ -2776,8 +2787,8 @@ static int proc_attr_dir_readdir(struct file *file, struct dir_context *ctx)
 
 static const struct file_operations proc_attr_dir_operations = {
 	.read		= generic_read_dir,
-	.iterate	= proc_attr_dir_readdir,
-	.llseek		= default_llseek,
+	.iterate_shared	= proc_attr_dir_readdir,
+	.llseek		= generic_file_llseek,
 };
 
 static struct dentry *proc_attr_dir_lookup(struct inode *dir,
@@ -3198,8 +3209,8 @@ static int proc_tgid_base_readdir(struct file *file, struct dir_context *ctx)
 
 static const struct file_operations proc_tgid_base_operations = {
 	.read		= generic_read_dir,
-	.iterate	= proc_tgid_base_readdir,
-	.llseek		= default_llseek,
+	.iterate_shared	= proc_tgid_base_readdir,
+	.llseek		= generic_file_llseek,
 };
 
 struct pid *tgid_pidfd_to_pid(const struct file *file)
@@ -3601,8 +3612,8 @@ static struct dentry *proc_tid_base_lookup(struct inode *dir, struct dentry *den
 
 static const struct file_operations proc_tid_base_operations = {
 	.read		= generic_read_dir,
-	.iterate	= proc_tid_base_readdir,
-	.llseek		= default_llseek,
+	.iterate_shared	= proc_tid_base_readdir,
+	.llseek		= generic_file_llseek,
 };
 
 static const struct inode_operations proc_tid_base_inode_operations = {
@@ -3812,6 +3823,6 @@ static const struct inode_operations proc_task_inode_operations = {
 
 static const struct file_operations proc_task_operations = {
 	.read		= generic_read_dir,
-	.iterate	= proc_task_readdir,
-	.llseek		= default_llseek,
+	.iterate_shared	= proc_task_readdir,
+	.llseek		= generic_file_llseek,
 };

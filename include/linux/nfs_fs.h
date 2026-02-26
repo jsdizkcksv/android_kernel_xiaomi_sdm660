@@ -169,11 +169,9 @@ struct nfs_inode {
 	/* Open contexts for shared mmap writes */
 	struct list_head	open_files;
 
-	/* Number of in-flight sillydelete RPC calls */
-	atomic_t		silly_count;
-	/* List of deferred sillydelete requests */
-	struct hlist_head	silly_list;
-	wait_queue_head_t	waitqueue;
+	/* Readers: in-flight sillydelete RPC calls */
+	/* Writers: rmdir */
+	struct rw_semaphore	rmdir_sem;
 
 #if IS_ENABLED(CONFIG_NFS_V4)
 	struct nfs4_cached_acl	*nfs4_acl;
@@ -359,6 +357,7 @@ extern int nfs_revalidate_inode(struct nfs_server *server, struct inode *inode);
 extern int nfs_revalidate_inode_rcu(struct nfs_server *server, struct inode *inode);
 extern int __nfs_revalidate_inode(struct nfs_server *, struct inode *);
 extern int nfs_revalidate_mapping(struct inode *inode, struct address_space *mapping);
+extern int nfs_revalidate_mapping_rcu(struct inode *inode);
 extern int nfs_revalidate_mapping_protected(struct inode *inode, struct address_space *mapping);
 extern int nfs_setattr(struct dentry *, struct iattr *);
 extern void nfs_setattr_update_inode(struct inode *inode, struct iattr *attr, struct nfs_fattr *);
@@ -498,9 +497,6 @@ extern void nfs_release_automount_timer(void);
  * linux/fs/nfs/unlink.c
  */
 extern void nfs_complete_unlink(struct dentry *dentry, struct inode *);
-extern void nfs_wait_on_sillyrename(struct dentry *dentry);
-extern void nfs_block_sillyrename(struct dentry *dentry);
-extern void nfs_unblock_sillyrename(struct dentry *dentry);
 
 /*
  * linux/fs/nfs/write.c

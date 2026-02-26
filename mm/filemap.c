@@ -11,6 +11,7 @@
  */
 #include <linux/export.h>
 #include <linux/compiler.h>
+#include <linux/dax.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/capability.h>
@@ -116,7 +117,7 @@ static int page_cache_tree_insert(struct address_space *mapping,
 	void **slot;
 	int error;
 
-	error = __radix_tree_create(&mapping->page_tree, page->index,
+	error = __radix_tree_create(&mapping->page_tree, page->index, 0,
 				    &node, &slot);
 	if (error)
 		return error;
@@ -126,28 +127,17 @@ static int page_cache_tree_insert(struct address_space *mapping,
 		p = radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
 		if (!radix_tree_exceptional_entry(p))
 			return -EEXIST;
+
+		if (WARN_ON(dax_mapping(mapping)))
+			return -EINVAL;
+
 		if (shadowp)
 			*shadowp = p;
-		mapping->nrshadows--;
-		if (node)
-			workingset_node_shadows_dec(node);
+		mapping->nrexceptional--;
 	}
-	radix_tree_replace_slot(slot, page);
+	__radix_tree_replace(&mapping->page_tree, node, slot, page,
+			     workingset_update_node, mapping);
 	mapping->nrpages++;
-	if (node) {
-		workingset_node_pages_inc(node);
-		/*
-		 * Don't track node that contains actual pages.
-		 *
-		 * Avoid acquiring the list_lru lock if already
-		 * untracked.  The list_empty() test is safe as
-		 * node->private_list is protected by
-		 * mapping->tree_lock.
-		 */
-		if (!list_empty(&node->private_list))
-			list_lru_del(&workingset_shadow_nodes,
-				     &node->private_list);
-	}
 	return 0;
 }
 
@@ -155,27 +145,21 @@ static void page_cache_tree_delete(struct address_space *mapping,
 				   struct page *page, void *shadow)
 {
 	struct radix_tree_node *node;
-	unsigned long index;
-	unsigned int offset;
-	unsigned int tag;
 	void **slot;
 
 	VM_BUG_ON(!PageLocked(page));
 
-	__radix_tree_lookup(&mapping->page_tree, page->index, &node, &slot);
+	__radix_tree_lookup(&mapping->page_tree, page->index,
+				    &node, &slot);
 
-	if (!node) {
-		/*
-		 * We need a node to properly account shadow
-		 * entries. Don't plant any without. XXX
-		 */
-		shadow = NULL;
-	}
+	radix_tree_clear_tags(&mapping->page_tree, node, slot);
+	__radix_tree_replace(&mapping->page_tree, node, slot, shadow,
+			     workingset_update_node, mapping);
 
 	if (shadow) {
-		mapping->nrshadows++;
+		mapping->nrexceptional++;
 		/*
-		 * Make sure the nrshadows update is committed before
+		 * Make sure the nrexceptional update is committed before
 		 * the nrpages update so that final truncate racing
 		 * with reclaim does not see both counters 0 at the
 		 * same time and miss a shadow entry.
@@ -183,43 +167,6 @@ static void page_cache_tree_delete(struct address_space *mapping,
 		smp_wmb();
 	}
 	mapping->nrpages--;
-
-	if (!node) {
-		/* Clear direct pointer tags in root node */
-		mapping->page_tree.gfp_mask &= __GFP_BITS_MASK;
-		radix_tree_replace_slot(slot, shadow);
-		return;
-	}
-
-	/* Clear tree tags for the removed page */
-	index = page->index;
-	offset = index & RADIX_TREE_MAP_MASK;
-	for (tag = 0; tag < RADIX_TREE_MAX_TAGS; tag++) {
-		if (test_bit(offset, node->tags[tag]))
-			radix_tree_tag_clear(&mapping->page_tree, index, tag);
-	}
-
-	/* Delete page, swap shadow entry */
-	radix_tree_replace_slot(slot, shadow);
-	workingset_node_pages_dec(node);
-	if (shadow)
-		workingset_node_shadows_inc(node);
-	else
-		if (__radix_tree_delete_node(&mapping->page_tree, node))
-			return;
-
-	/*
-	 * Track node that only contains shadow entries.
-	 *
-	 * Avoid acquiring the list_lru lock if already tracked.  The
-	 * list_empty() test is safe as node->private_list is
-	 * protected by mapping->tree_lock.
-	 */
-	if (!workingset_node_pages(node) &&
-	    list_empty(&node->private_list)) {
-		node->private_data = mapping;
-		list_lru_add(&workingset_shadow_nodes, &node->private_list);
-	}
 }
 
 /*
@@ -1244,7 +1191,6 @@ unsigned find_get_entries(struct address_space *mapping,
 		return 0;
 
 	rcu_read_lock();
-restart:
 	radix_tree_for_each_slot(slot, &mapping->page_tree, &iter, start) {
 		struct page *page;
 repeat:
@@ -1252,12 +1198,14 @@ repeat:
 		if (unlikely(!page))
 			continue;
 		if (radix_tree_exception(page)) {
-			if (radix_tree_deref_retry(page))
-				goto restart;
+			if (radix_tree_deref_retry(page)) {
+				slot = radix_tree_iter_retry(&iter);
+				continue;
+			}
 			/*
-			 * A shadow entry of a recently evicted page,
-			 * or a swap entry from shmem/tmpfs.  Return
-			 * it without attempting to raise page count.
+			 * A shadow entry of a recently evicted page, a swap
+			 * entry from shmem/tmpfs or a DAX entry.  Return it
+			 * without attempting to raise page count.
 			 */
 			goto export;
 		}
@@ -1306,7 +1254,6 @@ unsigned find_get_pages(struct address_space *mapping, pgoff_t start,
 		return 0;
 
 	rcu_read_lock();
-restart:
 	radix_tree_for_each_slot(slot, &mapping->page_tree, &iter, start) {
 		struct page *page;
 repeat:
@@ -1316,13 +1263,8 @@ repeat:
 
 		if (radix_tree_exception(page)) {
 			if (radix_tree_deref_retry(page)) {
-				/*
-				 * Transient condition which can only trigger
-				 * when entry at index 0 moves out of or back
-				 * to root: none yet gotten, safe to restart.
-				 */
-				WARN_ON(iter.index);
-				goto restart;
+				slot = radix_tree_iter_retry(&iter);
+				continue;
 			}
 			/*
 			 * A shadow entry of a recently evicted page,
@@ -1373,7 +1315,6 @@ unsigned find_get_pages_contig(struct address_space *mapping, pgoff_t index,
 		return 0;
 
 	rcu_read_lock();
-restart:
 	radix_tree_for_each_contig(slot, &mapping->page_tree, &iter, index) {
 		struct page *page;
 repeat:
@@ -1384,12 +1325,8 @@ repeat:
 
 		if (radix_tree_exception(page)) {
 			if (radix_tree_deref_retry(page)) {
-				/*
-				 * Transient condition which can only trigger
-				 * when entry at index 0 moves out of or back
-				 * to root: none yet gotten, safe to restart.
-				 */
-				goto restart;
+				slot = radix_tree_iter_retry(&iter);
+				continue;
 			}
 			/*
 			 * A shadow entry of a recently evicted page,
@@ -1451,7 +1388,6 @@ unsigned find_get_pages_range_tag(struct address_space *mapping, pgoff_t *index,
 		return 0;
 
 	rcu_read_lock();
-restart:
 	radix_tree_for_each_tagged(slot, &mapping->page_tree,
 				   &iter, *index, tag) {
 		struct page *page;
@@ -1465,12 +1401,8 @@ repeat:
 
 		if (radix_tree_exception(page)) {
 			if (radix_tree_deref_retry(page)) {
-				/*
-				 * Transient condition which can only trigger
-				 * when entry at index 0 moves out of or back
-				 * to root: none yet gotten, safe to restart.
-				 */
-				goto restart;
+				slot = radix_tree_iter_retry(&iter);
+				continue;
 			}
 			/*
 			 * A shadow entry of a recently evicted page.
@@ -2111,10 +2043,11 @@ repeat:
 		if (unlikely(!page))
 			goto next;
 		if (radix_tree_exception(page)) {
-			if (radix_tree_deref_retry(page))
-				break;
-			else
-				goto next;
+			if (radix_tree_deref_retry(page)) {
+				slot = radix_tree_iter_retry(&iter);
+				continue;
+			}
+			goto next;
 		}
 
 		if (!page_cache_get_speculative(page))
@@ -2752,11 +2685,11 @@ ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	struct inode *inode = file->f_mapping->host;
 	ssize_t ret;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	ret = generic_write_checks(iocb, from);
 	if (ret > 0)
 		ret = __generic_file_write_iter(iocb, from);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	if (ret > 0) {
 		ssize_t err;

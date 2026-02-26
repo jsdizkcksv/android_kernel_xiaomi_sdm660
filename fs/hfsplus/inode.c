@@ -229,14 +229,14 @@ static int hfsplus_file_release(struct inode *inode, struct file *file)
 	if (HFSPLUS_IS_RSRC(inode))
 		inode = HFSPLUS_I(inode)->rsrc_inode;
 	if (atomic_dec_and_test(&HFSPLUS_I(inode)->opencnt)) {
-		mutex_lock(&inode->i_mutex);
+		inode_lock(inode);
 		hfsplus_file_truncate(inode);
 		if (inode->i_flags & S_DEAD) {
 			hfsplus_delete_cat(inode->i_ino,
 					   HFSPLUS_SB(sb)->hidden_dir, NULL);
 			hfsplus_delete_inode(inode);
 		}
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 	}
 	return 0;
 }
@@ -286,7 +286,7 @@ int hfsplus_file_fsync(struct file *file, loff_t start, loff_t end,
 	error = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (error)
 		return error;
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	/*
 	 * Sync inode metadata into the catalog and extent trees.
@@ -327,17 +327,14 @@ int hfsplus_file_fsync(struct file *file, loff_t start, loff_t end,
 	if (!test_bit(HFSPLUS_SB_NOBARRIER, &sbi->flags))
 		blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
 
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	return error;
 }
 
 static const struct inode_operations hfsplus_file_inode_operations = {
 	.setattr	= hfsplus_setattr,
-	.setxattr	= generic_setxattr,
-	.getxattr	= generic_getxattr,
 	.listxattr	= hfsplus_listxattr,
-	.removexattr	= generic_removexattr,
 #ifdef CONFIG_HFSPLUS_FS_POSIX_ACL
 	.get_acl	= hfsplus_get_posix_acl,
 	.set_acl	= hfsplus_set_posix_acl,
@@ -374,6 +371,7 @@ struct inode *hfsplus_new_inode(struct super_block *sb, umode_t mode)
 
 	hip = HFSPLUS_I(inode);
 	INIT_LIST_HEAD(&hip->open_dir_list);
+	spin_lock_init(&hip->open_dir_lock);
 	mutex_init(&hip->extents_lock);
 	atomic_set(&hip->opencnt, 0);
 	hip->extent_state = 0;
@@ -403,6 +401,7 @@ struct inode *hfsplus_new_inode(struct super_block *sb, umode_t mode)
 	} else if (S_ISLNK(inode->i_mode)) {
 		sbi->file_count++;
 		inode->i_op = &page_symlink_inode_operations;
+		inode_nohighmem(inode);
 		inode->i_mapping->a_ops = &hfsplus_aops;
 		hip->clump_blocks = 1;
 	} else
@@ -526,6 +525,7 @@ int hfsplus_cat_read_inode(struct inode *inode, struct hfs_find_data *fd)
 			inode->i_mapping->a_ops = &hfsplus_aops;
 		} else if (S_ISLNK(inode->i_mode)) {
 			inode->i_op = &page_symlink_inode_operations;
+			inode_nohighmem(inode);
 			inode->i_mapping->a_ops = &hfsplus_aops;
 		} else {
 			init_special_inode(inode, inode->i_mode,

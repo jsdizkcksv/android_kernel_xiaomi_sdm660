@@ -26,6 +26,7 @@
 #include "xattr.h"
 #include "acl.h"
 
+#if 0
 #ifdef CONFIG_FS_DAX
 /*
  * The lock ordering for ext2 DAX fault paths is:
@@ -139,6 +140,9 @@ static int ext2_file_mmap(struct file *file, struct vm_area_struct *vma)
 #else
 #define ext2_file_mmap	generic_file_mmap
 #endif
+#endif
+
+#define ext2_file_mmap	generic_file_mmap
 
 /*
  * Called when filp is released. This happens when all file descriptors
@@ -193,10 +197,7 @@ const struct file_operations ext2_file_operations = {
 
 const struct inode_operations ext2_file_inode_operations = {
 #ifdef CONFIG_EXT2_FS_XATTR
-	.setxattr	= generic_setxattr,
-	.getxattr	= generic_getxattr,
 	.listxattr	= ext2_listxattr,
-	.removexattr	= generic_removexattr,
 #endif
 	.setattr	= ext2_setattr,
 	.get_acl	= ext2_get_acl,

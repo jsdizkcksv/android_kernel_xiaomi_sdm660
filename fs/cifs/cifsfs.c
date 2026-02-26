@@ -640,9 +640,7 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 		while (*s && *s != sep)
 			s++;
 
-		mutex_lock(&dir->i_mutex);
-		child = lookup_one_len(p, dentry, s - p);
-		mutex_unlock(&dir->i_mutex);
+		child = lookup_one_len_unlocked(p, dentry, s - p);
 		dput(dentry);
 		dentry = child;
 	} while (!IS_ERR(dentry));
@@ -890,10 +888,7 @@ const struct inode_operations cifs_dir_inode_ops = {
 	.symlink = cifs_symlink,
 	.mknod   = cifs_mknod,
 #ifdef CONFIG_CIFS_XATTR
-	.setxattr = cifs_setxattr,
-	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
-	.removexattr = cifs_removexattr,
 #endif
 };
 
@@ -903,26 +898,19 @@ const struct inode_operations cifs_file_inode_ops = {
 	.getattr = cifs_getattr, /* do we need this anymore? */
 	.permission = cifs_permission,
 #ifdef CONFIG_CIFS_XATTR
-	.setxattr = cifs_setxattr,
-	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
-	.removexattr = cifs_removexattr,
 #endif
 };
 
 const struct inode_operations cifs_symlink_inode_ops = {
 	.readlink = generic_readlink,
-	.follow_link = cifs_follow_link,
-	.put_link = kfree_put_link,
+	.get_link = cifs_get_link,
 	.permission = cifs_permission,
 	/* BB add the following two eventually */
 	/* revalidate: cifs_revalidate,
 	   setattr:    cifs_notify_change, *//* BB do we need notify change */
 #ifdef CONFIG_CIFS_XATTR
-	.setxattr = cifs_setxattr,
-	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
-	.removexattr = cifs_removexattr,
 #endif
 };
 
@@ -1022,7 +1010,7 @@ const struct file_operations cifs_file_direct_nobrl_ops = {
 };
 
 const struct file_operations cifs_dir_ops = {
-	.iterate = cifs_readdir,
+	.iterate_shared = cifs_readdir,
 	.release = cifs_closedir,
 	.read    = generic_read_dir,
 	.unlocked_ioctl  = cifs_ioctl,

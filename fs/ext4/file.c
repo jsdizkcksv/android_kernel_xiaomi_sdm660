@@ -113,7 +113,7 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		ext4_unwritten_wait(inode);
 	}
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	ret = generic_write_checks(iocb, from);
 	if (ret <= 0)
 		goto out;
@@ -169,7 +169,7 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 
 	ret = __generic_file_write_iter(iocb, from);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	if (ret > 0) {
 		ssize_t err;
@@ -186,12 +186,13 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	return ret;
 
 out:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	if (aio_mutex)
 		mutex_unlock(aio_mutex);
 	return ret;
 }
 
+#if 0
 #ifdef CONFIG_FS_DAX
 static void ext4_end_io_unwritten(struct buffer_head *bh, int uptodate)
 {
@@ -329,6 +330,9 @@ static const struct vm_operations_struct ext4_dax_vm_ops = {
 #else
 #define ext4_dax_vm_ops	ext4_file_vm_ops
 #endif
+#endif
+
+#define ext4_dax_vm_ops	ext4_file_vm_ops
 
 static const struct vm_operations_struct ext4_file_vm_ops = {
 	.fault		= ext4_filemap_fault,
@@ -556,11 +560,11 @@ static loff_t ext4_seek_data(struct file *file, loff_t offset, loff_t maxsize)
 	int blkbits;
 	int ret = 0;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	isize = i_size_read(inode);
 	if (offset < 0 || offset >= isize) {
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 		return -ENXIO;
 	}
 
@@ -608,7 +612,7 @@ static loff_t ext4_seek_data(struct file *file, loff_t offset, loff_t maxsize)
 		dataoff = (loff_t)last << blkbits;
 	} while (last <= end);
 
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	if (dataoff > isize)
 		return -ENXIO;
@@ -629,11 +633,11 @@ static loff_t ext4_seek_hole(struct file *file, loff_t offset, loff_t maxsize)
 	int blkbits;
 	int ret = 0;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	isize = i_size_read(inode);
 	if (offset < 0 || offset >= isize) {
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 		return -ENXIO;
 	}
 
@@ -684,7 +688,7 @@ static loff_t ext4_seek_hole(struct file *file, loff_t offset, loff_t maxsize)
 		break;
 	} while (last <= end);
 
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	if (holeoff > isize)
 		holeoff = isize;
@@ -742,10 +746,7 @@ const struct file_operations ext4_file_operations = {
 const struct inode_operations ext4_file_inode_operations = {
 	.setattr	= ext4_setattr,
 	.getattr	= ext4_getattr,
-	.setxattr	= generic_setxattr,
-	.getxattr	= generic_getxattr,
 	.listxattr	= ext4_listxattr,
-	.removexattr	= generic_removexattr,
 	.get_acl	= ext4_get_acl,
 	.set_acl	= ext4_set_acl,
 	.fiemap		= ext4_fiemap,

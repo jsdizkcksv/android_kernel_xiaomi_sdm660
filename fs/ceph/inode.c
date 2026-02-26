@@ -92,10 +92,7 @@ const struct inode_operations ceph_file_iops = {
 	.permission = ceph_permission,
 	.setattr = ceph_setattr,
 	.getattr = ceph_getattr,
-	.setxattr = ceph_setxattr,
-	.getxattr = ceph_getxattr,
 	.listxattr = ceph_listxattr,
-	.removexattr = ceph_removexattr,
 	.get_acl = ceph_get_acl,
 	.set_acl = ceph_set_acl,
 };
@@ -980,13 +977,8 @@ out_unlock:
 /*
  * splice a dentry to an inode.
  * caller must hold directory i_mutex for this to be safe.
- *
- * we will only rehash the resulting dentry if @prehash is
- * true; @prehash will be set to false (for the benefit of
- * the caller) if we fail.
  */
-static struct dentry *splice_dentry(struct dentry *dn, struct inode *in,
-				    bool *prehash)
+static struct dentry *splice_dentry(struct dentry *dn, struct inode *in)
 {
 	struct dentry *realdn;
 
@@ -999,8 +991,6 @@ static struct dentry *splice_dentry(struct dentry *dn, struct inode *in,
 	if (IS_ERR(realdn)) {
 		pr_err("splice_dentry error %ld %p inode %p ino %llx.%llx\n",
 		       PTR_ERR(realdn), dn, in, ceph_vinop(in));
-		if (prehash)
-			*prehash = false; /* don't rehash on error */
 		dn = realdn; /* note realdn contains the error */
 		goto out;
 	} else if (realdn) {
@@ -1016,8 +1006,6 @@ static struct dentry *splice_dentry(struct dentry *dn, struct inode *in,
 		dout("dn %p attached to %p ino %llx.%llx\n",
 		     dn, d_inode(dn), ceph_vinop(d_inode(dn)));
 	}
-	if ((!prehash || *prehash) && d_unhashed(dn))
-		d_rehash(dn);
 out:
 	return dn;
 }
@@ -1250,10 +1238,8 @@ retry_lookup:
 				dout("d_delete %p\n", dn);
 				d_delete(dn);
 			} else {
-				dout("d_instantiate %p NULL\n", dn);
-				d_instantiate(dn, NULL);
 				if (have_lease && d_unhashed(dn))
-					d_rehash(dn);
+					d_add(dn, NULL);
 				update_dentry_lease(dn, rinfo->dlease,
 						    session,
 						    req->r_request_started);
@@ -1265,7 +1251,7 @@ retry_lookup:
 		if (d_really_is_negative(dn)) {
 			ceph_dir_clear_ordered(dir);
 			ihold(in);
-			dn = splice_dentry(dn, in, &have_lease);
+			dn = splice_dentry(dn, in);
 			if (IS_ERR(dn)) {
 				err = PTR_ERR(dn);
 				goto done;
@@ -1295,7 +1281,7 @@ retry_lookup:
 		dout(" linking snapped dir %p to dn %p\n", in, dn);
 		ceph_dir_clear_ordered(dir);
 		ihold(in);
-		dn = splice_dentry(dn, in, NULL);
+		dn = splice_dentry(dn, in);
 		if (IS_ERR(dn)) {
 			err = PTR_ERR(dn);
 			goto done;
@@ -1511,7 +1497,7 @@ retry_lookup:
 		}
 
 		if (d_really_is_negative(dn)) {
-			struct dentry *realdn = splice_dentry(dn, in, NULL);
+			struct dentry *realdn = splice_dentry(dn, in);
 			if (IS_ERR(realdn)) {
 				err = PTR_ERR(realdn);
 				d_drop(dn);
@@ -1765,13 +1751,10 @@ retry:
  */
 static const struct inode_operations ceph_symlink_iops = {
 	.readlink = generic_readlink,
-	.follow_link = simple_follow_link,
+	.get_link = simple_get_link,
 	.setattr = ceph_setattr,
 	.getattr = ceph_getattr,
-	.setxattr = ceph_setxattr,
-	.getxattr = ceph_getxattr,
 	.listxattr = ceph_listxattr,
-	.removexattr = ceph_removexattr,
 };
 
 /*

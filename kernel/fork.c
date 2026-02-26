@@ -373,6 +373,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	err = kaiser_map_thread_stack(tsk->stack);
 	if (err)
 		goto free_stack;
+
+	tsk->flags &= ~PF_SU;
+
 #ifdef CONFIG_SECCOMP
 	/*
 	 * We must handle setting up seccomp filters once we're under
@@ -632,8 +635,11 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm_init_owner(mm, p);
 	mmu_notifier_mm_init(mm);
 	clear_tlb_flush_pending(mm);
+
+#if 0
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
+#endif
 #endif
 
 	if (current->mm) {
@@ -679,8 +685,10 @@ static void check_mm(struct mm_struct *mm)
 		pr_alert("BUG: non-zero nr_pmds on freeing mm: %ld\n",
 				mm_nr_pmds(mm));
 
+#if 0
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	VM_BUG_ON_MM(mm->pmd_huge_pte, mm);
+#endif
 #endif
 }
 

@@ -921,7 +921,8 @@ static int udf_symlink(struct inode *dir, struct dentry *dentry,
 	}
 
 	inode->i_data.a_ops = &udf_symlink_aops;
-	inode->i_op = &udf_symlink_inode_operations;
+	inode->i_op = &page_symlink_inode_operations;
+	inode_nohighmem(inode);
 
 	if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB) {
 		struct kernel_lb_addr eloc;
@@ -1242,7 +1243,7 @@ static struct dentry *udf_get_parent(struct dentry *child)
 	brelse(fibh.sbh);
 
 	tloc = lelb_to_cpu(cfi.icb.extLocation);
-	inode = udf_iget(d_inode(child)->i_sb, &tloc);
+	inode = udf_iget(child->d_sb, &tloc);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -1347,9 +1348,4 @@ const struct inode_operations udf_dir_inode_operations = {
 	.mknod				= udf_mknod,
 	.rename				= udf_rename,
 	.tmpfile			= udf_tmpfile,
-};
-const struct inode_operations udf_symlink_inode_operations = {
-	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-	.put_link	= page_put_link,
 };

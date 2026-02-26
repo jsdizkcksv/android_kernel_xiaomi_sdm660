@@ -30,13 +30,18 @@ struct vm_area_struct;
 #define ___GFP_HARDWALL		0x20000u
 #define ___GFP_THISNODE		0x40000u
 #define ___GFP_ATOMIC		0x80000u
-#define ___GFP_NOACCOUNT	0x100000u
+#define ___GFP_ACCOUNT		0x100000u
 #define ___GFP_NOTRACK		0x200000u
 #define ___GFP_DIRECT_RECLAIM	0x400000u
 #define ___GFP_OTHER_NODE	0x800000u
 #define ___GFP_WRITE		0x1000000u
 #define ___GFP_KSWAPD_RECLAIM	0x2000000u
 #define ___GFP_CMA		0x4000000u
+#ifdef CONFIG_LOCKDEP
+#define ___GFP_NOLOCKDEP	0x8000000u
+#else
+#define ___GFP_NOLOCKDEP	0
+#endif
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -75,11 +80,15 @@ struct vm_area_struct;
  *
  * __GFP_THISNODE forces the allocation to be satisified from the requested
  *   node with no fallbacks or placement policy enforcements.
+ *
+ * __GFP_ACCOUNT causes the allocation to be accounted to kmemcg (only relevant
+ *   to kmem allocations).
  */
 #define __GFP_RECLAIMABLE ((__force gfp_t)___GFP_RECLAIMABLE)
 #define __GFP_WRITE	((__force gfp_t)___GFP_WRITE)
 #define __GFP_HARDWALL   ((__force gfp_t)___GFP_HARDWALL)
 #define __GFP_THISNODE	((__force gfp_t)___GFP_THISNODE)
+#define __GFP_ACCOUNT	((__force gfp_t)___GFP_ACCOUNT)
 
 /*
  * Watermark modifiers -- controls access to emergency reserves
@@ -106,7 +115,6 @@ struct vm_area_struct;
 #define __GFP_HIGH	((__force gfp_t)___GFP_HIGH)
 #define __GFP_MEMALLOC	((__force gfp_t)___GFP_MEMALLOC)
 #define __GFP_NOMEMALLOC ((__force gfp_t)___GFP_NOMEMALLOC)
-#define __GFP_NOACCOUNT	((__force gfp_t)___GFP_NOACCOUNT)
 
 /*
  * Reclaim modifiers
@@ -184,8 +192,11 @@ struct vm_area_struct;
 #define __GFP_NOTRACK_FALSE_POSITIVE (__GFP_NOTRACK)
 #define __GFP_OTHER_NODE ((__force gfp_t)___GFP_OTHER_NODE)
 
+/* Disable lockdep for GFP context tracking */
+#define __GFP_NOLOCKDEP ((__force gfp_t)___GFP_NOLOCKDEP)
+
 /* Room for N __GFP_FOO bits */
-#define __GFP_BITS_SHIFT 27
+#define __GFP_BITS_SHIFT (27 + IS_ENABLED(CONFIG_LOCKDEP))
 #define __GFP_BITS_MASK ((__force gfp_t)((1 << __GFP_BITS_SHIFT) - 1))
 
 /*
@@ -198,6 +209,9 @@ struct vm_area_struct;
  *
  * GFP_KERNEL is typical for kernel-internal allocations. The caller requires
  *   ZONE_NORMAL or a lower zone for direct access but can direct reclaim.
+ *
+ * GFP_KERNEL_ACCOUNT is the same as GFP_KERNEL, except the allocation is
+ *   accounted to kmemcg.
  *
  * GFP_NOWAIT is for kernel allocations that should not stall for direct
  *   reclaim, start physical IO or use any filesystem callback.
@@ -238,6 +252,7 @@ struct vm_area_struct;
  */
 #define GFP_ATOMIC	(__GFP_HIGH|__GFP_ATOMIC|__GFP_KSWAPD_RECLAIM)
 #define GFP_KERNEL	(__GFP_RECLAIM | __GFP_IO | __GFP_FS)
+#define GFP_KERNEL_ACCOUNT (GFP_KERNEL | __GFP_ACCOUNT)
 #define GFP_NOWAIT	(__GFP_KSWAPD_RECLAIM)
 #define GFP_NOIO	(__GFP_RECLAIM)
 #define GFP_NOFS	(__GFP_RECLAIM | __GFP_IO)

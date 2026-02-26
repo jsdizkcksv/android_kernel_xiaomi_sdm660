@@ -141,6 +141,8 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_fop = &no_open_fops;
 	inode->__i_nlink = 1;
 	inode->i_opflags = 0;
+	if (sb->s_xattr)
+		inode->i_opflags |= IOP_XATTR;
 	i_uid_write(inode, 0);
 	i_gid_write(inode, 0);
 	atomic_set(&inode->i_writecount, 0);
@@ -152,6 +154,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_bdev = NULL;
 	inode->i_cdev = NULL;
 	inode->i_link = NULL;
+	inode->i_dir_seq = 0;
 	inode->i_rdev = 0;
 	inode->dirtied_when = 0;
 
@@ -166,8 +169,8 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	spin_lock_init(&inode->i_lock);
 	lockdep_set_class(&inode->i_lock, &sb->s_type->i_lock_key);
 
-	mutex_init(&inode->i_mutex);
-	lockdep_set_class(&inode->i_mutex, &sb->s_type->i_mutex_key);
+	init_rwsem(&inode->i_rwsem);
+	lockdep_set_class(&inode->i_rwsem, &sb->s_type->i_mutex_key);
 
 	atomic_set(&inode->i_dio_count, 0);
 
@@ -239,9 +242,9 @@ void __destroy_inode(struct inode *inode)
 	}
 
 #ifdef CONFIG_FS_POSIX_ACL
-	if (inode->i_acl && inode->i_acl != ACL_NOT_CACHED)
+	if (inode->i_acl && !is_uncached_acl(inode->i_acl))
 		posix_acl_release(inode->i_acl);
-	if (inode->i_default_acl && inode->i_default_acl != ACL_NOT_CACHED)
+	if (inode->i_default_acl && !is_uncached_acl(inode->i_default_acl))
 		posix_acl_release(inode->i_default_acl);
 #endif
 	this_cpu_dec(nr_inodes);
@@ -345,7 +348,7 @@ EXPORT_SYMBOL(inc_nlink);
 void address_space_init_once(struct address_space *mapping)
 {
 	memset(mapping, 0, sizeof(*mapping));
-	INIT_RADIX_TREE(&mapping->page_tree, GFP_ATOMIC);
+	INIT_RADIX_TREE(&mapping->page_tree, GFP_ATOMIC | __GFP_ACCOUNT);
 	spin_lock_init(&mapping->tree_lock);
 	init_rwsem(&mapping->i_mmap_rwsem);
 	INIT_LIST_HEAD(&mapping->private_list);
@@ -502,7 +505,7 @@ void clear_inode(struct inode *inode)
 	 */
 	spin_lock_irq(&inode->i_data.tree_lock);
 	BUG_ON(inode->i_data.nrpages);
-	BUG_ON(inode->i_data.nrshadows);
+	BUG_ON(inode->i_data.nrexceptional);
 	spin_unlock_irq(&inode->i_data.tree_lock);
 	BUG_ON(!list_empty(&inode->i_data.private_list));
 	BUG_ON(!(inode->i_state & I_FREEING));
@@ -926,13 +929,13 @@ void lockdep_annotate_inode_mutex_key(struct inode *inode)
 		struct file_system_type *type = inode->i_sb->s_type;
 
 		/* Set new key only if filesystem hasn't already changed it */
-		if (lockdep_match_class(&inode->i_mutex, &type->i_mutex_key)) {
+		if (lockdep_match_class(&inode->i_rwsem, &type->i_mutex_key)) {
 			/*
 			 * ensure nobody is actually holding i_mutex
 			 */
-			mutex_destroy(&inode->i_mutex);
-			mutex_init(&inode->i_mutex);
-			lockdep_set_class(&inode->i_mutex,
+			// mutex_destroy(&inode->i_mutex);
+			init_rwsem(&inode->i_rwsem);
+			lockdep_set_class(&inode->i_rwsem,
 					  &type->i_mutex_dir_key);
 		}
 	}
@@ -974,9 +977,9 @@ void lock_two_nondirectories(struct inode *inode1, struct inode *inode2)
 		swap(inode1, inode2);
 
 	if (inode1 && !S_ISDIR(inode1->i_mode))
-		mutex_lock(&inode1->i_mutex);
+		inode_lock(inode1);
 	if (inode2 && !S_ISDIR(inode2->i_mode) && inode2 != inode1)
-		mutex_lock_nested(&inode2->i_mutex, I_MUTEX_NONDIR2);
+		inode_lock_nested(inode2, I_MUTEX_NONDIR2);
 }
 EXPORT_SYMBOL(lock_two_nondirectories);
 
@@ -988,9 +991,9 @@ EXPORT_SYMBOL(lock_two_nondirectories);
 void unlock_two_nondirectories(struct inode *inode1, struct inode *inode2)
 {
 	if (inode1 && !S_ISDIR(inode1->i_mode))
-		mutex_unlock(&inode1->i_mutex);
+		inode_unlock(inode1);
 	if (inode2 && !S_ISDIR(inode2->i_mode) && inode2 != inode1)
-		mutex_unlock(&inode2->i_mutex);
+		inode_unlock(inode2);
 }
 EXPORT_SYMBOL(unlock_two_nondirectories);
 

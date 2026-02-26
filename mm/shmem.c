@@ -255,18 +255,19 @@ static void shmem_recalc_inode(struct inode *inode)
 static int shmem_radix_tree_replace(struct address_space *mapping,
 			pgoff_t index, void *expected, void *replacement)
 {
+	struct radix_tree_node *node;
 	void **pslot;
 	void *item;
 
 	VM_BUG_ON(!expected);
 	VM_BUG_ON(!replacement);
-	pslot = radix_tree_lookup_slot(&mapping->page_tree, index);
-	if (!pslot)
+	item = __radix_tree_lookup(&mapping->page_tree, index, &node, &pslot);
+	if (!item)
 		return -ENOENT;
-	item = radix_tree_deref_slot_protected(pslot, &mapping->tree_lock);
 	if (item != expected)
 		return -ENOENT;
-	radix_tree_replace_slot(pslot, replacement);
+	__radix_tree_replace(&mapping->page_tree, node, pslot,
+			     replacement, NULL, NULL);
 	return 0;
 }
 
@@ -628,6 +629,30 @@ static void shmem_evict_inode(struct inode *inode)
 	clear_inode(inode);
 }
 
+static unsigned long find_swap_entry(struct radix_tree_root *root, void *item)
+{
+	struct radix_tree_iter iter;
+	void **slot;
+	unsigned long found = -1;
+	unsigned int checked = 0;
+
+	rcu_read_lock();
+	radix_tree_for_each_slot(slot, root, &iter, 0) {
+		if (*slot == item) {
+			found = iter.index;
+			break;
+		}
+		checked++;
+		if ((checked % 4096) != 0)
+			continue;
+		slot = radix_tree_iter_resume(slot, &iter);
+		cond_resched_rcu();
+	}
+
+	rcu_read_unlock();
+	return found;
+}
+
 /*
  * If swap found in inode, free it and move page from swapcache to filecache.
  */
@@ -641,7 +666,7 @@ static int shmem_unuse_inode(struct shmem_inode_info *info,
 	int error = 0;
 
 	radswap = swp_to_radix_entry(swap);
-	index = radix_tree_locate_item(&mapping->page_tree, radswap);
+	index = find_swap_entry(&mapping->page_tree, radswap);
 	if (index == -1)
 		return -EAGAIN;	/* tell shmem_unuse we found nothing */
 
@@ -1815,7 +1840,7 @@ static loff_t shmem_file_llseek(struct file *file, loff_t offset, int whence)
 	if (whence != SEEK_DATA && whence != SEEK_HOLE)
 		return generic_file_llseek_size(file, offset, whence,
 					MAX_LFS_FILESIZE, i_size_read(inode));
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	/* We're holding i_mutex so we can access i_size directly */
 
 	if (offset < 0 || offset >= inode->i_size)
@@ -1837,7 +1862,7 @@ static loff_t shmem_file_llseek(struct file *file, loff_t offset, int whence)
 
 	if (offset >= 0)
 		offset = vfs_setpos(file, offset, MAX_LFS_FILESIZE);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return offset;
 }
 
@@ -1860,12 +1885,13 @@ static void shmem_tag_pins(struct address_space *mapping)
 	start = 0;
 
 	spin_lock_irq(&mapping->tree_lock);
-restart:
 	radix_tree_for_each_slot(slot, &mapping->page_tree, &iter, start) {
 		page = radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
 		if (!page || radix_tree_exception(page)) {
-			if (radix_tree_deref_retry(page))
-				goto restart;
+			if (radix_tree_deref_retry(page)) {
+				slot = radix_tree_iter_retry(&iter);
+				continue;
+			}
 		} else if (page_count(page) - page_mapcount(page) > 1) {
 			radix_tree_tag_set(&mapping->page_tree, iter.index,
 					   SHMEM_TAG_PINNED);
@@ -1874,11 +1900,10 @@ restart:
 		if (++tagged % 1024)
 			continue;
 
+		slot = radix_tree_iter_resume(slot, &iter);
 		spin_unlock_irq(&mapping->tree_lock);
 		cond_resched();
-		start = iter.index + 1;
 		spin_lock_irq(&mapping->tree_lock);
-		goto restart;
 	}
 	spin_unlock_irq(&mapping->tree_lock);
 }
@@ -1914,14 +1939,15 @@ static int shmem_wait_for_pins(struct address_space *mapping)
 
 		start = 0;
 		rcu_read_lock();
-restart:
 		radix_tree_for_each_tagged(slot, &mapping->page_tree, &iter,
 					   start, SHMEM_TAG_PINNED) {
 
 			page = radix_tree_deref_slot(slot);
 			if (radix_tree_exception(page)) {
-				if (radix_tree_deref_retry(page))
-					goto restart;
+				if (radix_tree_deref_retry(page)) {
+					slot = radix_tree_iter_retry(&iter);
+					continue;
+				}
 
 				page = NULL;
 			}
@@ -1945,9 +1971,8 @@ restart:
 			spin_unlock_irq(&mapping->tree_lock);
 continue_resched:
 			if (need_resched()) {
+				slot = radix_tree_iter_resume(slot, &iter);
 				cond_resched_rcu();
-				start = iter.index + 1;
-				goto restart;
 			}
 		}
 		rcu_read_unlock();
@@ -2004,7 +2029,7 @@ int shmem_add_seals(struct file *file, unsigned int seals)
 	if (seals & ~(unsigned int)F_ALL_SEALS)
 		return -EINVAL;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	if (info->seals & F_SEAL_SEAL) {
 		error = -EPERM;
@@ -2027,7 +2052,7 @@ int shmem_add_seals(struct file *file, unsigned int seals)
 	error = 0;
 
 unlock:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return error;
 }
 EXPORT_SYMBOL_GPL(shmem_add_seals);
@@ -2077,7 +2102,7 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		return -EOPNOTSUPP;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	if (mode & FALLOC_FL_PUNCH_HOLE) {
 		struct address_space *mapping = file->f_mapping;
@@ -2192,7 +2217,7 @@ undone:
 	inode->i_private = NULL;
 	spin_unlock(&inode->i_lock);
 out:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return error;
 }
 
@@ -2445,7 +2470,6 @@ static int shmem_symlink(struct inode *dir, struct dentry *dentry, const char *s
 	int len;
 	struct inode *inode;
 	struct page *page;
-	char *kaddr;
 	struct shmem_inode_info *info;
 
 	len = strlen(symname) + 1;
@@ -2483,9 +2507,8 @@ static int shmem_symlink(struct inode *dir, struct dentry *dentry, const char *s
 		}
 		inode->i_mapping->a_ops = &shmem_aops;
 		inode->i_op = &shmem_symlink_inode_operations;
-		kaddr = kmap_atomic(page);
-		memcpy(kaddr, symname, len);
-		kunmap_atomic(kaddr);
+		inode_nohighmem(inode);
+		memcpy(page_address(page), symname, len);
 		SetPageUptodate(page);
 		set_page_dirty(page);
 		unlock_page(page);
@@ -2498,23 +2521,34 @@ static int shmem_symlink(struct inode *dir, struct dentry *dentry, const char *s
 	return 0;
 }
 
-static const char *shmem_follow_link(struct dentry *dentry, void **cookie)
+static void shmem_put_link(void *arg)
 {
-	struct page *page = NULL;
-	int error = shmem_getpage(d_inode(dentry), 0, &page, SGP_READ, NULL);
-	if (error)
-		return ERR_PTR(error);
-	unlock_page(page);
-	*cookie = page;
-	return kmap(page);
+	mark_page_accessed(arg);
+	put_page(arg);
 }
 
-static void shmem_put_link(struct inode *unused, void *cookie)
+static const char *shmem_get_link(struct dentry *dentry,
+				  struct inode *inode,
+				  struct delayed_call *done)
 {
-	struct page *page = cookie;
-	kunmap(page);
-	mark_page_accessed(page);
-	page_cache_release(page);
+	struct page *page = NULL;
+	int error;
+	if (!dentry) {
+		page = find_get_page(inode->i_mapping, 0);
+		if (!page)
+			return ERR_PTR(-ECHILD);
+		if (!PageUptodate(page)) {
+			put_page(page);
+			return ERR_PTR(-ECHILD);
+		}
+	} else {
+		error = shmem_getpage(inode, 0, &page, SGP_READ, NULL);
+		if (error)
+			return ERR_PTR(error);
+		unlock_page(page);
+	}
+	set_delayed_call(done, shmem_put_link, page);
+	return page_address(page);
 }
 
 #ifdef CONFIG_TMPFS_XATTR
@@ -2561,122 +2595,69 @@ static int shmem_initxattrs(struct inode *inode,
 	return 0;
 }
 
+static int shmem_xattr_handler_get(const struct xattr_handler *handler,
+				   struct dentry *unused, struct inode *inode,
+				   const char *name, void *buffer, size_t size)
+{
+	struct shmem_inode_info *info = SHMEM_I(inode);
+
+	name = xattr_full_name(handler, name);
+	return simple_xattr_get(&info->xattrs, name, buffer, size);
+}
+
+static int shmem_xattr_handler_set(const struct xattr_handler *handler,
+				   struct dentry *unused, struct inode *inode,
+				   const char *name, const void *value,
+				   size_t size, int flags)
+{
+	struct shmem_inode_info *info = SHMEM_I(inode);
+
+	name = xattr_full_name(handler, name);
+	return simple_xattr_set(&info->xattrs, name, value, size, flags);
+}
+
+static const struct xattr_handler shmem_security_xattr_handler = {
+	.prefix = XATTR_SECURITY_PREFIX,
+	.get = shmem_xattr_handler_get,
+	.set = shmem_xattr_handler_set,
+};
+
+static const struct xattr_handler shmem_trusted_xattr_handler = {
+	.prefix = XATTR_TRUSTED_PREFIX,
+	.get = shmem_xattr_handler_get,
+	.set = shmem_xattr_handler_set,
+};
+
 static const struct xattr_handler *shmem_xattr_handlers[] = {
 #ifdef CONFIG_TMPFS_POSIX_ACL
 	&posix_acl_access_xattr_handler,
 	&posix_acl_default_xattr_handler,
 #endif
+	&shmem_security_xattr_handler,
+	&shmem_trusted_xattr_handler,
 	NULL
 };
-
-static int shmem_xattr_validate(const char *name)
-{
-	struct { const char *prefix; size_t len; } arr[] = {
-		{ XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN },
-		{ XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN }
-	};
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(arr); i++) {
-		size_t preflen = arr[i].len;
-		if (strncmp(name, arr[i].prefix, preflen) == 0) {
-			if (!name[preflen])
-				return -EINVAL;
-			return 0;
-		}
-	}
-	return -EOPNOTSUPP;
-}
-
-static ssize_t shmem_getxattr(struct dentry *dentry, const char *name,
-			      void *buffer, size_t size)
-{
-	struct shmem_inode_info *info = SHMEM_I(d_inode(dentry));
-	int err;
-
-	/*
-	 * If this is a request for a synthetic attribute in the system.*
-	 * namespace use the generic infrastructure to resolve a handler
-	 * for it via sb->s_xattr.
-	 */
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_getxattr(dentry, name, buffer, size);
-
-	err = shmem_xattr_validate(name);
-	if (err)
-		return err;
-
-	return simple_xattr_get(&info->xattrs, name, buffer, size);
-}
-
-static int shmem_setxattr(struct dentry *dentry, const char *name,
-			  const void *value, size_t size, int flags)
-{
-	struct shmem_inode_info *info = SHMEM_I(d_inode(dentry));
-	int err;
-
-	/*
-	 * If this is a request for a synthetic attribute in the system.*
-	 * namespace use the generic infrastructure to resolve a handler
-	 * for it via sb->s_xattr.
-	 */
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_setxattr(dentry, name, value, size, flags);
-
-	err = shmem_xattr_validate(name);
-	if (err)
-		return err;
-
-	return simple_xattr_set(&info->xattrs, name, value, size, flags);
-}
-
-static int shmem_removexattr(struct dentry *dentry, const char *name)
-{
-	struct shmem_inode_info *info = SHMEM_I(d_inode(dentry));
-	int err;
-
-	/*
-	 * If this is a request for a synthetic attribute in the system.*
-	 * namespace use the generic infrastructure to resolve a handler
-	 * for it via sb->s_xattr.
-	 */
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_removexattr(dentry, name);
-
-	err = shmem_xattr_validate(name);
-	if (err)
-		return err;
-
-	return simple_xattr_remove(&info->xattrs, name);
-}
 
 static ssize_t shmem_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
 	struct shmem_inode_info *info = SHMEM_I(d_inode(dentry));
-	return simple_xattr_list(&info->xattrs, buffer, size);
+	return simple_xattr_list(d_inode(dentry), &info->xattrs, buffer, size);
 }
 #endif /* CONFIG_TMPFS_XATTR */
 
 static const struct inode_operations shmem_short_symlink_operations = {
 	.readlink	= generic_readlink,
-	.follow_link	= simple_follow_link,
+	.get_link	= simple_get_link,
 #ifdef CONFIG_TMPFS_XATTR
-	.setxattr	= shmem_setxattr,
-	.getxattr	= shmem_getxattr,
 	.listxattr	= shmem_listxattr,
-	.removexattr	= shmem_removexattr,
 #endif
 };
 
 static const struct inode_operations shmem_symlink_inode_operations = {
 	.readlink	= generic_readlink,
-	.follow_link	= shmem_follow_link,
-	.put_link	= shmem_put_link,
+	.get_link	= shmem_get_link,
 #ifdef CONFIG_TMPFS_XATTR
-	.setxattr	= shmem_setxattr,
-	.getxattr	= shmem_getxattr,
 	.listxattr	= shmem_listxattr,
-	.removexattr	= shmem_removexattr,
 #endif
 };
 
@@ -3089,7 +3070,8 @@ static struct inode *shmem_alloc_inode(struct super_block *sb)
 static void shmem_destroy_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
-	kfree(inode->i_link);
+	if (S_ISLNK(inode->i_mode))
+		kfree(inode->i_link);
 	kmem_cache_free(shmem_inode_cachep, SHMEM_I(inode));
 }
 
@@ -3149,10 +3131,7 @@ static const struct inode_operations shmem_inode_operations = {
 	.getattr	= shmem_getattr,
 	.setattr	= shmem_setattr,
 #ifdef CONFIG_TMPFS_XATTR
-	.setxattr	= shmem_setxattr,
-	.getxattr	= shmem_getxattr,
 	.listxattr	= shmem_listxattr,
-	.removexattr	= shmem_removexattr,
 	.set_acl	= simple_set_acl,
 #endif
 };
@@ -3171,10 +3150,7 @@ static const struct inode_operations shmem_dir_inode_operations = {
 	.tmpfile	= shmem_tmpfile,
 #endif
 #ifdef CONFIG_TMPFS_XATTR
-	.setxattr	= shmem_setxattr,
-	.getxattr	= shmem_getxattr,
 	.listxattr	= shmem_listxattr,
-	.removexattr	= shmem_removexattr,
 #endif
 #ifdef CONFIG_TMPFS_POSIX_ACL
 	.setattr	= shmem_setattr,
@@ -3184,10 +3160,7 @@ static const struct inode_operations shmem_dir_inode_operations = {
 
 static const struct inode_operations shmem_special_inode_operations = {
 #ifdef CONFIG_TMPFS_XATTR
-	.setxattr	= shmem_setxattr,
-	.getxattr	= shmem_getxattr,
 	.listxattr	= shmem_listxattr,
-	.removexattr	= shmem_removexattr,
 #endif
 #ifdef CONFIG_TMPFS_POSIX_ACL
 	.setattr	= shmem_setattr,

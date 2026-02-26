@@ -55,7 +55,7 @@ xfs_rw_ilock(
 	int			type)
 {
 	if (type & XFS_IOLOCK_EXCL)
-		mutex_lock(&VFS_I(ip)->i_mutex);
+		inode_lock(VFS_I(ip));
 	xfs_ilock(ip, type);
 }
 
@@ -66,7 +66,7 @@ xfs_rw_iunlock(
 {
 	xfs_iunlock(ip, type);
 	if (type & XFS_IOLOCK_EXCL)
-		mutex_unlock(&VFS_I(ip)->i_mutex);
+		inode_unlock(VFS_I(ip));
 }
 
 static inline void
@@ -76,7 +76,7 @@ xfs_rw_ilock_demote(
 {
 	xfs_ilock_demote(ip, type);
 	if (type & XFS_IOLOCK_EXCL)
-		mutex_unlock(&VFS_I(ip)->i_mutex);
+		inode_unlock(VFS_I(ip));
 }
 
 /*
@@ -1667,7 +1667,7 @@ const struct file_operations xfs_file_operations = {
 const struct file_operations xfs_dir_file_operations = {
 	.open		= xfs_dir_open,
 	.read		= generic_read_dir,
-	.iterate	= xfs_file_readdir,
+	.iterate_shared	= xfs_file_readdir,
 	.llseek		= generic_file_llseek,
 	.unlocked_ioctl	= xfs_file_ioctl,
 #ifdef CONFIG_COMPAT

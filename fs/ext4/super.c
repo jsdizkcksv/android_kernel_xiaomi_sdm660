@@ -1691,6 +1691,8 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 		sbi->s_jquota_fmt = m->mount_opt;
 #endif
 	} else if (token == Opt_dax) {
+
+#if 0
 #ifdef CONFIG_FS_DAX
 		ext4_msg(sb, KERN_WARNING,
 		"DAX enabled. Warning: EXPERIMENTAL, use at your own risk");
@@ -1699,6 +1701,10 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 		ext4_msg(sb, KERN_INFO, "dax option not supported");
 		return -1;
 #endif
+#endif
+
+		ext4_msg(sb, KERN_INFO, "dax option not supported");
+		return -1;
 	} else {
 		if (!args->from)
 			arg = 1;
@@ -2375,10 +2381,10 @@ static void ext4_orphan_cleanup(struct super_block *sb,
 					__func__, inode->i_ino, inode->i_size);
 			jbd_debug(2, "truncating inode %lu to %lld bytes\n",
 				  inode->i_ino, inode->i_size);
-			mutex_lock(&inode->i_mutex);
+			inode_lock(inode);
 			truncate_inode_pages(inode->i_mapping, inode->i_size);
 			ext4_truncate(inode);
-			mutex_unlock(&inode->i_mutex);
+			inode_unlock(inode);
 			nr_truncates++;
 		} else {
 			if (test_opt(sb, DEBUG))

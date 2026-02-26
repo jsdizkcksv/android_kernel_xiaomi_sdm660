@@ -39,10 +39,10 @@ int jffs2_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 	if (ret)
 		return ret;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	/* Trigger GC to flush any pending writes for this inode */
 	jffs2_flush_wbuf_gc(c, inode->i_ino);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	return 0;
 }
@@ -66,10 +66,7 @@ const struct inode_operations jffs2_file_inode_operations =
 	.get_acl =	jffs2_get_acl,
 	.set_acl =	jffs2_set_acl,
 	.setattr =	jffs2_setattr,
-	.setxattr =	jffs2_setxattr,
-	.getxattr =	jffs2_getxattr,
 	.listxattr =	jffs2_listxattr,
-	.removexattr =	jffs2_removexattr
 };
 
 const struct address_space_operations jffs2_file_address_operations =

@@ -29,6 +29,15 @@
 #include <linux/uio.h>
 #include <linux/vmstat.h>
 
+#define RADIX_DAX_MASK	0xf
+#define RADIX_DAX_SHIFT	4
+#define RADIX_DAX_PTE  (0x4 | RADIX_TREE_EXCEPTIONAL_ENTRY)
+#define RADIX_DAX_PMD  (0x8 | RADIX_TREE_EXCEPTIONAL_ENTRY)
+#define RADIX_DAX_TYPE(entry) ((unsigned long)entry & RADIX_DAX_MASK)
+#define RADIX_DAX_SECTOR(entry) (((unsigned long)entry >> RADIX_DAX_SHIFT))
+#define RADIX_DAX_ENTRY(sector, pmd) ((void *)((unsigned long)sector << \
+		RADIX_DAX_SHIFT | (pmd ? RADIX_DAX_PMD : RADIX_DAX_PTE)))
+
 /*
  * dax_clear_blocks() is called from within transaction context from XFS,
  * and hence this means the stack from this point must follow GFP_NOFS
@@ -218,10 +227,10 @@ ssize_t dax_do_io(struct kiocb *iocb, struct inode *inode,
 
 	if ((flags & DIO_LOCKING) && iov_iter_rw(iter) == READ) {
 		struct address_space *mapping = inode->i_mapping;
-		mutex_lock(&inode->i_mutex);
+		inode_lock(inode);
 		retval = filemap_write_and_wait_range(mapping, pos, end - 1);
 		if (retval) {
-			mutex_unlock(&inode->i_mutex);
+			inode_unlock(inode);
 			goto out;
 		}
 	}
@@ -233,7 +242,7 @@ ssize_t dax_do_io(struct kiocb *iocb, struct inode *inode,
 	retval = dax_io(inode, iter, pos, end, get_block, &bh);
 
 	if ((flags & DIO_LOCKING) && iov_iter_rw(iter) == READ)
-		mutex_unlock(&inode->i_mutex);
+		inode_unlock(inode);
 
 	if ((retval > 0) && end_io)
 		end_io(iocb, pos, retval, bh.b_private);
@@ -516,6 +525,7 @@ int dax_fault(struct vm_area_struct *vma, struct vm_fault *vmf,
 }
 EXPORT_SYMBOL_GPL(dax_fault);
 
+#if 0
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 /*
  * The 'colour' (ie low bits) within a PMD of a page offset.  This comes up
@@ -697,6 +707,7 @@ int dax_pmd_fault(struct vm_area_struct *vma, unsigned long address,
 }
 EXPORT_SYMBOL_GPL(dax_pmd_fault);
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
+#endif
 
 /**
  * dax_pfn_mkwrite - handle first write to DAX page

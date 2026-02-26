@@ -512,7 +512,7 @@ static loff_t ceph_dir_llseek(struct file *file, loff_t offset, int whence)
 	loff_t old_offset = ceph_make_fpos(fi->frag, fi->next_offset);
 	loff_t retval;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	retval = -EINVAL;
 	switch (whence) {
 	case SEEK_CUR:
@@ -547,7 +547,7 @@ static loff_t ceph_dir_llseek(struct file *file, loff_t offset, int whence)
 		}
 	}
 out:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return retval;
 }
 
@@ -1326,10 +1326,7 @@ const struct inode_operations ceph_dir_iops = {
 	.permission = ceph_permission,
 	.getattr = ceph_getattr,
 	.setattr = ceph_setattr,
-	.setxattr = ceph_setxattr,
-	.getxattr = ceph_getxattr,
 	.listxattr = ceph_listxattr,
-	.removexattr = ceph_removexattr,
 	.get_acl = ceph_get_acl,
 	.set_acl = ceph_set_acl,
 	.mknod = ceph_mknod,
